@@ -326,66 +326,97 @@ def _read_big_table(filepath):
     return snapshot
 
 
-def _resolve_dup_columns_global(small_header, data_rows, dup_col_names, filename, sheet_name):
+def _resolve_dup_with_big(small_header, data_rows, dup_col_names,
+                          big_header, big_col_groups, filename, sheet_name):
     """
-    列级别同名列冲突处理：展示两列所有值，一次性选择。
-    dup_col_names: {col_name: [col_idx1, col_idx2]}
-    返回 (col_choice_dict, cancelled)
-      col_choice_dict: {col_name: preferred_col_index} 或 None（取消）
+    三步同名列处理：
+      Step 1: 小表所有同名列每行值完全一致 → 该值填入大表全部同名列
+      Step 2: 小表同名列数量 == 大表同名列数量 → 按列顺序依次对应填入
+      Step 3: 小表同名列数量 > 大表同名列数量 → 对大表每一个同名列弹窗选择
+    返回 (big_to_small, cancelled)
+      big_to_small: {big_col_idx: small_col_idx} 大表列位置到小表列位置的映射
     """
-    result = {}
+    big_to_small = {}
 
-    for col_name, idxs in dup_col_names.items():
-        ci1, ci2 = idxs[0], idxs[1]
-        col_letter1 = _col_letter(ci1)
-        col_letter2 = _col_letter(ci2)
+    for col_name, small_idxs in dup_col_names.items():
+        big_idxs = big_col_groups.get(col_name, [])
+        n_big = len(big_idxs)
+        n_small = len(small_idxs)
 
-        # 提取两列所有值
-        col1_vals = []
-        col2_vals = []
-        all_same = True
-        for row in data_rows:
-            v1 = row[ci1] if ci1 < len(row) else ''
-            v2 = row[ci2] if ci2 < len(row) else ''
-            if v1 != v2:
-                all_same = False
-            col1_vals.append(v1)
-            col2_vals.append(v2)
-
-        if all_same:
-            # 两列完全一致，自动选第一列
-            result[col_name] = ci1
-            log('  %s / %s: 同名列「%s」(%s vs %s) 值完全一致，自动使用第一列' %
-                (filename, sheet_name, col_name, col_letter1, col_letter2))
+        if n_big == 0:
+            # 大表没有同名列（不应出现，dup_col_names 已过滤），跳过
             continue
 
-        # 弹窗：展示两列全值对比，选一次
-        choice = _dup_col_dialog(col_name, col_letter1, col_letter2,
-                                 col1_vals, col2_vals,
-                                 filename, sheet_name)
-        if choice == 'cancel_table':
-            return None, True
-        elif choice == 'use_col2':
-            result[col_name] = ci2
-            log('  %s / %s: 同名列「%s」→ 使用第二列 %s' %
-                (filename, sheet_name, col_name, col_letter2))
-        else:  # use_col1
-            result[col_name] = ci1
-            log('  %s / %s: 同名列「%s」→ 使用第一列 %s' %
-                (filename, sheet_name, col_name, col_letter1))
+        # 提取小表所有同名列的每列值
+        small_col_vals = []  # [(small_idx, values_list)]
+        all_same = True
+        first_vals = None
+        for si in small_idxs:
+            vals = [row[si] if si < len(row) else '' for row in data_rows]
+            small_col_vals.append((si, vals))
+            if first_vals is None:
+                first_vals = vals
+            elif vals != first_vals:
+                all_same = False
 
-    return result, False
+        # ═══ Step 1: 值全部一致 → 全部大表列用同一个小表列值 ═══
+        if all_same and n_small >= 1:
+            for bi in big_idxs:
+                big_to_small[bi] = small_idxs[0]
+            log('  %s / %s: 同名列「%s」%d列值完全一致，自动填入全部 %d 个大表列' %
+                (filename, sheet_name, col_name, n_small, n_big))
+            continue
+
+        # ═══ Step 2: 数量相等 → 顺序对应填入 ═══
+        if n_small == n_big:
+            for i in range(n_small):
+                big_to_small[big_idxs[i]] = small_idxs[i]
+            log('  %s / %s: 同名列「%s」数量相等(%d列)，按顺序对应填入' %
+                (filename, sheet_name, col_name, n_small))
+            continue
+
+        # ═══ Step 3: 小表多于大表 → 逐列弹窗 ═══
+        # 对每个大表同名列位置，让用户从小表 M 列中选一列填入
+        col_choices = [(si, vals, _col_letter(si)) for si, vals in small_col_vals]
+
+        for big_idx_pos, bi in enumerate(big_idxs):
+            choice = _dup_col_multi_dialog(
+                col_name, big_idx_pos + 1, n_big, n_small, col_choices,
+                filename, sheet_name
+            )
+            if choice == 'cancel_table':
+                return None, True
+            elif isinstance(choice, int):
+                big_to_small[bi] = choice
+                log('  %s / %s: 同名列「%s」大表第%d/%d列 → 小表 %s 列' %
+                    (filename, sheet_name, col_name,
+                     big_idx_pos + 1, n_big, _col_letter(choice)))
+            else:
+                # 'ignore' → 该大表列留空，记录异常
+                _exceptions.append({
+                    'filename': filename, 'sheet': sheet_name,
+                    'row_num': '-', 'col_name': col_name,
+                    'col1_pos': _col_letter(bi), 'col1_val': '-',
+                    'col2_pos': '-', 'col2_val': '-',
+                    'exc_type': '同名列未选择', 'action': '忽略',
+                })
+
+    return big_to_small, False
 
 
-def _dup_col_dialog(col_name, col_letter1, col_letter2, col1_vals, col2_vals,
-                    filename, sheet_name):
-    """同名列列级别选择对话框：列出两列所有值，选一次"""
+def _dup_col_multi_dialog(col_name, big_idx_pos, n_big, n_small, col_choices,
+                          filename, sheet_name):
+    """
+    多列选择对话框：从小表 n_small 列中选一列填入大表第 big_idx_pos 个同名列。
+    col_choices: [(small_idx, values_list, col_letter), ...]
+    返回: int(small_idx) / 'ignore' / 'cancel_table'
+    """
     _show_dialog_root()
-    result = {'value': 'use_col1'}
-    max_preview = min(len(col1_vals), 30)
+    result = {'value': 'cancel_table'}
+    max_preview = min(len(col_choices[0][1]) if col_choices else 0, 30)
 
     dlg = tk.Toplevel(_root)
-    dlg.title('同名列冲突 — %s' % col_name)
+    dlg.title('同名列选择 — %s (大表 %d/%d)' % (col_name, big_idx_pos, n_big))
     dlg.resizable(True, True)
     dlg.transient(_root)
     dlg.grab_set()
@@ -396,71 +427,77 @@ def _dup_col_dialog(col_name, col_letter1, col_letter2, col1_vals, col2_vals,
         pass
 
     # 标题
-    header_info = '文件: %s  |  Sheet: %s  |  列名: %s' % (filename, sheet_name, col_name)
+    header_info = '文件: %s  |  Sheet: %s  |  列名: %s  |  大表第 %d/%d 个' % (
+        filename, sheet_name, col_name, big_idx_pos, n_big)
     tk.Label(dlg, text=header_info, font=_dialog_font(), padx=15, pady=10).pack(anchor=tk.W)
 
-    # 两列对比（滚动文本框）
+    tk.Label(dlg, text='小表中共有 %d 个「%s」列，请选择哪一列填入大表这个位置：' % (n_small, col_name),
+             font=(_dialog_font()[0], 10, 'bold'), fg='#1a5276', padx=15).pack(anchor=tk.W)
+
+    # 展示所有列的值对比
     frame = tk.Frame(dlg)
-    frame.pack(padx=15, pady=0, fill=tk.BOTH, expand=True)
+    frame.pack(padx=15, pady=5, fill=tk.BOTH, expand=True)
 
-    # 表头
-    tk.Label(frame, text='序号', font=('Courier', 9, 'bold'), width=5, anchor=tk.W).grid(row=0, column=0, padx=2)
-    tk.Label(frame, text='%s (第1列)' % col_name, font=('Courier', 9, 'bold'), width=12, anchor=tk.W,
-             fg='#1a5276').grid(row=0, column=1, padx=2)
-    tk.Label(frame, text='%s (第2列)' % col_name, font=('Courier', 9, 'bold'), width=12, anchor=tk.W,
-             fg='#922b21').grid(row=0, column=2, padx=2)
+    # 构建 Text widget 显示对比
+    text_widget = tk.Text(frame, font=('Courier', 10), width=80,
+                          height=min(18, max_preview + 3), wrap=tk.NONE)
+    scroll_y = tk.Scrollbar(frame, orient=tk.VERTICAL, command=text_widget.yview)
+    scroll_x = tk.Scrollbar(frame, orient=tk.HORIZONTAL, command=text_widget.xview)
+    text_widget.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
 
-    # 分隔线
-    tk.Label(frame, text='─' * 30, font=('Courier', 9), fg='gray').grid(row=1, column=0, columnspan=3, sticky='ew')
+    text_widget.grid(row=0, column=0, sticky='nsew')
+    scroll_y.grid(row=0, column=1, sticky='ns')
+    scroll_x.grid(row=1, column=0, sticky='ew')
+    frame.rowconfigure(0, weight=1)
+    frame.columnconfigure(0, weight=1)
 
-    # 滚动区域
-    text_frame = tk.Frame(frame)
-    text_frame.grid(row=2, column=0, columnspan=3, sticky='nsew')
-    frame.rowconfigure(2, weight=1)
+    # 表头行
+    header_line = '%-5s' % '行号'
+    for _, _, letter in col_choices:
+        header_line += '  %-16s' % ('%s(%s)' % (col_name, letter))
+    text_widget.insert(tk.END, header_line + '\n', 'header')
+    text_widget.insert(tk.END, '─' * 80 + '\n', 'sep')
 
-    scrollbar = tk.Scrollbar(text_frame)
-    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    # 数据行
+    for row_i in range(max_preview):
+        line = '%-5d' % (row_i + 1)
+        for _, vals, _ in col_choices:
+            v = vals[row_i] if row_i < len(vals) else ''
+            line += '  %-16s' % (v[:15])
+        tag = 'diff' if _row_has_diff(row_i, col_choices) else 'same'
+        text_widget.insert(tk.END, line + '\n', tag)
 
-    listbox = tk.Listbox(text_frame, yscrollcommand=scrollbar.set,
-                         font=('Courier', 10), width=35, height=min(16, max_preview))
-    scrollbar.config(command=listbox.yview)
+    if len(col_choices[0][1]) > max_preview:
+        text_widget.insert(tk.END,
+                           '（仅显示前 %d 行，共 %d 行）\n' % (max_preview, len(col_choices[0][1])),
+                           'info')
 
-    for i in range(max_preview):
-        v1 = col1_vals[i] if i < len(col1_vals) else ''
-        v2 = col2_vals[i] if i < len(col2_vals) else ''
-        # 突出显示不同的行
-        marker = ' ▶' if v1 != v2 else '  '
-        line = '%2d    %-10s    %-10s' % (i + 1, v1[:10], v2[:10])
-        listbox.insert(tk.END, marker + line)
-        if v1 != v2:
-            listbox.itemconfig(tk.END, {'bg': '#fef9e7', 'fg': '#7d6608'})
+    text_widget.tag_config('header', font=('Courier', 10, 'bold'), foreground='#1a5276')
+    text_widget.tag_config('sep', foreground='gray')
+    text_widget.tag_config('diff', background='#fef9e7', foreground='#7d6608')
+    text_widget.tag_config('same', foreground='#2c3e50')
+    text_widget.tag_config('info', foreground='gray')
+    text_widget.configure(state=tk.DISABLED)
 
-    listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-    if len(col1_vals) > max_preview:
-        tk.Label(dlg, text='（仅显示前 %d 行，共 %d 行）' % (max_preview, len(col1_vals)),
-                 font=('Sans', 9), fg='gray').pack()
-
-    # 提示
-    tk.Label(dlg, text='⚠ 两列数据不一致。请选择要保留哪一列的全部数据：',
-             font=(_dialog_font()[0], 10, 'bold'), fg='#c0392b', padx=15, pady=5).pack()
-
+    # 按钮区
     btn_frame = tk.Frame(dlg)
-    btn_frame.pack(pady=5, padx=15)
+    btn_frame.pack(pady=10, padx=15)
 
     def _set_and_close(v):
         result['value'] = v
         dlg.destroy()
 
-    tk.Button(btn_frame, text='使用第1列 %s' % col_name, width=18,
-              command=lambda: _set_and_close('use_col1'),
-              bg='#d4e6f1').pack(side=tk.LEFT, padx=4)
-    tk.Button(btn_frame, text='使用第2列 %s' % col_name, width=18,
-              command=lambda: _set_and_close('use_col2'),
-              bg='#f5b7b1').pack(side=tk.LEFT, padx=4)
+    for i, (si, _, letter) in enumerate(col_choices):
+        tk.Button(btn_frame, text='填入第%d列 %s(%s)' % (i + 1, col_name, letter),
+                  width=18,
+                  command=lambda v=si: _set_and_close(v),
+                  bg='#d4e6f1').pack(side=tk.LEFT, padx=3)
+
+    tk.Button(btn_frame, text='忽略(留空)', width=12,
+              command=lambda: _set_and_close('ignore'),
+              bg='#f9e79f').pack(side=tk.LEFT, padx=10)
     tk.Button(btn_frame, text='取消合并该表', width=14,
-              command=lambda: _set_and_close('cancel_table')).pack(side=tk.LEFT, padx=4)
+              command=lambda: _set_and_close('cancel_table')).pack(side=tk.LEFT, padx=3)
 
     try:
         dlg.focus_force()
@@ -468,6 +505,15 @@ def _dup_col_dialog(col_name, col_letter1, col_letter2, col1_vals, col2_vals,
         pass
     dlg.wait_window()
     return result['value']
+
+
+def _row_has_diff(row_i, col_choices):
+    """检查第 row_i 行各列值是否不完全一致"""
+    vals = []
+    for _, col_vals, _ in col_choices:
+        v = col_vals[row_i] if row_i < len(col_vals) else ''
+        vals.append(v)
+    return len(set(vals)) > 1
 
 
 def _extra_cols_dialog(filename, sheet_name, header_len, extra_rows):
@@ -793,7 +839,10 @@ def process_small_table(filepath, filename, big_snapshot):
             })
 
         # ── 构建列映射 ──
-        big_col_index = {name: bi for bi, name in enumerate(big_header)}
+        # 大表列名 → 所有出现位置（保留重复列的全部位置）
+        big_col_groups = {}  # {col_name: [col_idx, ...]}
+        for bi, name in enumerate(big_header):
+            big_col_groups.setdefault(name, []).append(bi)
 
         small_col_groups = {}  # {col_name: [col_idx, ...]}
         for si, name in enumerate(small_header):
@@ -804,7 +853,7 @@ def process_small_table(filepath, filename, big_snapshot):
         dup_col_names = {n: idxs for n, idxs in small_col_groups.items() if len(idxs) > 1}
 
         # 丢弃的列（小表有但大表没有）
-        discarded = [n for n in small_header if n != '' and n not in big_col_index]
+        discarded = [n for n in small_header if n != '' and n not in big_col_groups]
         if discarded:
             choice = _discarded_cols_dialog(filename, sheet_name, discarded)
             if choice == 'cancel_table':
@@ -821,25 +870,27 @@ def process_small_table(filepath, filename, big_snapshot):
                 })
             log('  %s / %s: 丢弃列: %s' % (filename, sheet_name, ', '.join(discarded)))
 
-        # ── 列级别处理同名列冲突（一次性选完，不再逐行问）──
-        dup_col_choice = {}  # {col_name: chosen_col_index}
+        # ── 同名列处理（三步判断：值一致→顺序填入→逐列弹窗）──
+        big_to_small = {}  # {big_col_idx: small_col_idx}
         if dup_col_names:
-            dup_col_choice, cancelled = _resolve_dup_columns_global(
-                small_header, data_rows, dup_col_names, filename, sheet_name
+            big_to_small, cancelled = _resolve_dup_with_big(
+                small_header, data_rows, dup_col_names,
+                big_header, big_col_groups, filename, sheet_name
             )
             if cancelled:
                 _cancelled_tables.append({'filename': filename, 'reason': '用户取消合并'})
                 return False, None
 
-        # ── 处理每一行（不再逐行弹窗）──
+        # ── 处理每一行（不逐行弹窗）──
         for row_idx, row in enumerate(data_rows, 2):
             out_row = []
-            for big_col_name in big_header:
+            for bi, big_col_name in enumerate(big_header):
                 if big_col_name == '表名':
                     out_row.append(_basename_no_ext(filename))
-                elif big_col_name in dup_col_choice:
-                    ci = dup_col_choice[big_col_name]
-                    val = row[ci] if ci < len(row) else ''
+                elif bi in big_to_small:
+                    # 通过大表列位置映射到小表列位置
+                    si = big_to_small[bi]
+                    val = row[si] if si < len(row) else ''
                     out_row.append(_auto_fill_value(val))
                 elif big_col_name in small_col_groups:
                     si = small_col_groups[big_col_name][0]
