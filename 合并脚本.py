@@ -326,6 +326,13 @@ def _read_big_table(filepath):
     return snapshot
 
 
+def _sample_vals(col_values, max_n=5):
+    """取前 max_n 个值，逗号分隔，空单元格留空。
+       返回: "30,,50,60,70" """
+    vals = [str(v) if v != '' and v is not None else '' for v in col_values[:max_n]]
+    return ','.join(vals)
+
+
 def _resolve_dup_with_big(small_header, data_rows, dup_col_names,
                           big_header, big_col_groups, filename, sheet_name):
     """
@@ -391,12 +398,18 @@ def _resolve_dup_with_big(small_header, data_rows, dup_col_names,
                 log('  %s / %s: 同名列「%s」大表第%d/%d列 → 小表 %s 列' %
                     (filename, sheet_name, col_name,
                      big_idx_pos + 1, n_big, _col_letter(choice)))
-            else:
-                # 'ignore' → 该大表列留空，记录异常
+            # 'ignore' → 此大表列留空，不记异常（由最终落选判断）
+
+        # 所有弹窗结束后，记录真正落选的小表列
+        used_small = set(v for k, v in big_to_small.items() if k in big_idxs)
+        for si in small_idxs:
+            if si not in used_small:
+                col_vals = [row[si] if si < len(row) else '' for row in data_rows]
+                sample = _sample_vals(col_vals)
                 _exceptions.append({
                     'filename': filename, 'sheet': sheet_name,
                     'row_num': '-', 'col_name': col_name,
-                    'col1_pos': _col_letter(bi), 'col1_val': '-',
+                    'col1_pos': _col_letter(si), 'col1_val': sample + ' (共%d行)' % len(data_rows),
                     'col2_pos': '-', 'col2_val': '-',
                     'exc_type': '同名列未选择', 'action': '忽略',
                 })
@@ -811,17 +824,29 @@ def process_small_table(filepath, filename, big_snapshot):
                 _cancelled_tables.append({'filename': filename, 'reason': '用户取消合并'})
                 return False, None
             else:
-                for row_num, row_len, extra_vals in extra_rows:
+                # 按额外列位置逐列汇总（而非逐行记录）
+                max_extra = max(len(ev) for _, _, ev in extra_rows)
+                n_rows = len(extra_rows)
+                for col_offset in range(max_extra):
+                    col_letter = _col_letter(header_len + col_offset)
+                    col_values = []
+                    for _, _, extra_vals in extra_rows:
+                        col_values.append(
+                            str(extra_vals[col_offset])
+                            if col_offset < len(extra_vals) else ''
+                        )
+                    sample = _sample_vals(col_values)
                     _exceptions.append({
                         'filename': filename, 'sheet': sheet_name,
-                        'row_num': row_num,
-                        'col_name': '(超出表头第 %d+ 列)' % header_len,
-                        'col1_pos': '-', 'col1_val': ', '.join(str(v) for v in extra_vals[:5]),
+                        'row_num': '全部行',
+                        'col_name': '超表头列数',
+                        'col1_pos': col_letter,
+                        'col1_val': sample + ' (共%d行)' % n_rows,
                         'col2_pos': '-', 'col2_val': '-',
                         'exc_type': '超表头列数', 'action': '忽略多余列',
                     })
-                log('  %s / %s: 检测到 %d 行数据超出表头 %d 列，已忽略多余列' %
-                    (filename, sheet_name, len(extra_rows), header_len))
+                log('  %s / %s: 检测到 %d 行数据超出表头 %d 列（%d 个额外列），已忽略' %
+                    (filename, sheet_name, n_rows, header_len, max_extra))
 
         # ── 检测无列名列（表头里的空列名）──
         no_header_cols = [ci for ci, h in enumerate(small_header) if h == '']
@@ -830,10 +855,13 @@ def process_small_table(filepath, filename, big_snapshot):
             if choice == 'cancel_table':
                 _cancelled_tables.append({'filename': filename, 'reason': '用户取消合并'})
                 return False, None
+            col_vals = [row[ci] if ci < len(row) else '' for row in data_rows]
+            sample = _sample_vals(col_vals)
             _exceptions.append({
                 'filename': filename, 'sheet': sheet_name,
-                'row_num': '-', 'col_name': '(无列名)',
-                'col1_pos': _col_letter(ci), 'col1_val': '-',
+                'row_num': '-', 'col_name': '数据异常，无列名',
+                'col1_pos': _col_letter(ci),
+                'col1_val': sample + ' (共%d行)' % len(data_rows),
                 'col2_pos': '-', 'col2_val': '-',
                 'exc_type': '无列名', 'action': '忽略',
             })
@@ -861,10 +889,13 @@ def process_small_table(filepath, filename, big_snapshot):
                 return False, None
             for col_name in discarded:
                 si = small_header.index(col_name)
+                col_vals = [row[si] if si < len(row) else '' for row in data_rows]
+                sample = _sample_vals(col_vals)
                 _exceptions.append({
                     'filename': filename, 'sheet': sheet_name,
                     'row_num': '-', 'col_name': col_name,
-                    'col1_pos': _col_letter(si), 'col1_val': '-',
+                    'col1_pos': _col_letter(si),
+                    'col1_val': sample + ' (共%d行)' % len(data_rows),
                     'col2_pos': '-', 'col2_val': '-',
                     'exc_type': '列名不存在于大表', 'action': '忽略并继续',
                 })
