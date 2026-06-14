@@ -57,8 +57,26 @@ def _parse_cell_ref(ref):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  xlsx 读取（纯 Python 标准库）
+#  文件读取（xlsx / csv）
 # ══════════════════════════════════════════════════════════════════
+
+def read_csv(filepath):
+    """读取 CSV 文件，返回 {'Sheet1': [header_row, data_row1, ...]}"""
+    import csv
+    with open(filepath, 'r', encoding='utf-8-sig') as f:
+        reader = csv.reader(f)
+        rows = [row for row in reader if row]
+    if not rows:
+        return {}
+    return {'Sheet1': rows}
+
+
+def read_table(filepath):
+    """根据后缀分发读取 xlsx 或 csv"""
+    if filepath.lower().endswith('.csv'):
+        return read_csv(filepath)
+    return read_xlsx(filepath)
+
 
 def read_xlsx(filepath):
     """读取 xlsx 文件，返回 {sheet_name: [header_row, data_row1, ...]}"""
@@ -288,24 +306,197 @@ def _basename_no_ext(filename):
     return os.path.splitext(filename)[0]
 
 
-def _scan_small_tables(big_filename, work_dir):
-    """扫描工作目录下的小表 .xlsx 文件"""
-    all_xlsx = [f for f in os.listdir(work_dir) if f.lower().endswith('.xlsx')]
-    # 排除大表本身
-    big_basename = os.path.basename(big_filename)
-    small = [f for f in all_xlsx if f != big_basename]
-    # 排除临时文件
-    skipped = [f for f in small if f.startswith('~$')]
-    small = [f for f in small if not f.startswith('~$')]
-    if skipped:
-        for s in skipped:
-            log(f'已排除临时文件: {s}')
-    return small
+def _scan_work_dir(work_dir):
+    """扫描工作目录下所有 .xlsx / .csv 文件，排除 ~$ 临时文件"""
+    files = []
+    for f in os.listdir(work_dir):
+        if f.startswith('~$'):
+            continue
+        low = f.lower()
+        if low.endswith('.xlsx') or low.endswith('.csv'):
+            files.append(f)
+    return sorted(files)
+
+
+def _template_file_dialog(files):
+    """模板文件单选对话框。返回选中的文件名或 None（取消）"""
+    _show_dialog_root()
+    result = {'value': None}
+
+    dlg = tk.Toplevel(_root)
+    dlg.title('选择模板文件')
+    dlg.resizable(False, True)
+    dlg.transient(_root)
+    dlg.grab_set()
+    try:
+        dlg.attributes('-topmost', True)
+    except Exception:
+        pass
+
+    tk.Label(dlg, text='选择模板文件', font=(_dialog_font()[0], 12, 'bold')
+             ).pack(padx=20, pady=15)
+
+    tk.Label(dlg, text='选择一个 Excel/CSV 文件作为合并模板。\n'
+                       '模板仅需包含表头行，不应包含数据。',
+             font=(_dialog_font()[0], 9), fg='#666'
+             ).pack(padx=20, pady=0)
+
+    # 列表
+    list_frame = tk.Frame(dlg)
+    list_frame.pack(padx=20, fill=tk.BOTH, expand=True)
+
+    listbox = tk.Listbox(list_frame, font=(_dialog_font()[0], 10),
+                         selectmode=tk.SINGLE, height=min(12, len(files)),
+                         exportselection=False)
+    for f in files:
+        listbox.insert(tk.END, f)
+    if files:
+        listbox.selection_set(0)
+    listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    scroll = tk.Scrollbar(list_frame, command=listbox.yview)
+    listbox.configure(yscrollcommand=scroll.set)
+    scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def _on_ok():
+        sel = listbox.curselection()
+        if sel:
+            result['value'] = files[sel[0]]
+            dlg.destroy()
+
+    listbox.bind('<Double-Button-1>', lambda e: _on_ok())
+
+    tk.Button(dlg, text='确定', width=12, command=_on_ok,
+              bg='#2e86c1', fg='white', font=(_dialog_font()[0], 10, 'bold')
+              ).pack(pady=10)
+
+    try:
+        dlg.focus_force()
+    except Exception:
+        pass
+    dlg.wait_window()
+    return result['value']
+
+
+def _merge_files_dialog(files, template_name):
+    """多选待合并文件对话框。返回选中的文件名列表或 None（取消）"""
+    _show_dialog_root()
+    result = {'value': None}
+
+    dlg = tk.Toplevel(_root)
+    dlg.title('选择待合并文件')
+    dlg.resizable(False, True)
+    dlg.transient(_root)
+    dlg.grab_set()
+    try:
+        dlg.attributes('-topmost', True)
+    except Exception:
+        pass
+
+    tk.Label(dlg, text='选择待合并文件', font=(_dialog_font()[0], 12, 'bold')
+             ).pack(padx=20, pady=15)
+
+    tk.Label(dlg, text='勾选要合并到模板的文件（已排除模板: %s）' % template_name,
+             font=(_dialog_font()[0], 9), fg='#666'
+             ).pack(padx=20, pady=0)
+
+    # 可滚动的 checkbox 区域
+    canvas = tk.Canvas(dlg, borderwidth=0, highlightthickness=0)
+    canvas.pack(side=tk.LEFT, padx=20, pady=0, fill=tk.BOTH, expand=True)
+    scrollbar = tk.Scrollbar(dlg, orient=tk.VERTICAL, command=canvas.yview)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=0, padx=0)
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    inner = tk.Frame(canvas)
+    canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+
+    var_map = {}  # {filename: tk.BooleanVar}
+    row_map = {}  # {filename: tk.Frame}  for background color
+
+    def _on_toggle(fname, var):
+        """勾选/取消时切换背景色"""
+        row = row_map.get(fname)
+        if row:
+            try:
+                new_bg = '#d4e6f1' if var.get() else 'white'
+                row.configure(bg=new_bg)
+                for child in row.winfo_children():
+                    child.configure(bg=new_bg)
+            except Exception:
+                pass
+
+    for f in files:
+        var = tk.BooleanVar(value=False)
+        var_map[f] = var
+
+        row = tk.Frame(inner, bg='white')
+        row.pack(fill=tk.X)
+        row_map[f] = row
+
+        cb = tk.Checkbutton(row, text=f, variable=var,
+                            font=(_dialog_font()[0], 10),
+                            bg='white', anchor=tk.W,
+                            command=lambda f=f, v=var: _on_toggle(f, v))
+        cb.pack(fill=tk.X, padx=5, pady=2)
+
+    # 全选按钮
+    def _select_all():
+        for f, var in var_map.items():
+            var.set(True)
+            _on_toggle(f, var)
+
+    def _deselect_all():
+        for f, var in var_map.items():
+            var.set(False)
+            _on_toggle(f, var)
+
+    btn_bar = tk.Frame(dlg)
+    btn_bar.pack(pady=0)
+
+    all_state = {'on': True}
+    def _toggle_all():
+        if all_state['on']:
+            _deselect_all()
+            all_state['on'] = False
+            btn_all.configure(text='全选')
+        else:
+            _select_all()
+            all_state['on'] = True
+            btn_all.configure(text='全不选')
+
+    btn_all = tk.Button(btn_bar, text='全选', width=8, command=_toggle_all)
+    btn_all.pack(side=tk.LEFT, padx=5)
+
+    def _on_ok():
+        selected = [f for f, var in var_map.items() if var.get()]
+        if not selected:
+            messagebox.showwarning('提示', '请至少选择一个文件。')
+            return
+        result['value'] = selected
+        dlg.destroy()
+
+    tk.Button(btn_bar, text='确定', width=12, command=_on_ok,
+              bg='#2e86c1', fg='white', font=(_dialog_font()[0], 10, 'bold')
+              ).pack(side=tk.LEFT, padx=5)
+
+    # 初始全选
+    _select_all()
+
+    inner.update_idletasks()
+    canvas.configure(scrollregion=canvas.bbox('all'))
+    canvas.configure(width=inner.winfo_reqwidth(), height=min(300, inner.winfo_reqheight()))
+
+    try:
+        dlg.focus_force()
+    except Exception:
+        pass
+    dlg.wait_window()
+    return result['value']
 
 
 def _read_big_table(filepath):
     """读取大表快照，验证「表名」列存在，返回快照"""
-    sheets = read_xlsx(filepath)
+    sheets = read_table(filepath)
     if not sheets:
         raise ValueError('大表没有任何 Sheet')
 
@@ -760,7 +951,7 @@ def process_small_table(filepath, filename, big_snapshot):
     row_data_dict: {sheet_name: [row_values, ...]}
     """
     try:
-        small_sheets = read_xlsx(filepath)
+        small_sheets = read_table(filepath)
     except Exception as e:
         log('错误: 读取 %s 失败 - %s' % (filename, e))
         return False, None
@@ -945,14 +1136,13 @@ def main():
     # ── 初始化 tkinter ──
     _root = tk.Tk()
     _root.withdraw()
-    # 创建一个 1×1 像素的占位窗口，确保 Windows 上 Toplevel/messagebox 正常弹出
     try:
         sw = _root.winfo_screenwidth()
         sh = _root.winfo_screenheight()
     except Exception:
         sw, sh = 200, 200
     _root.geometry('1x1+%d+%d' % (sw // 2, sh // 2))
-    _root.deiconify()  # 窗口极小（1×1），用户看不见但 Toplevel 绑定正常
+    _root.deiconify()
 
     # ── 定位工作目录 ──
     if getattr(sys, 'frozen', False):
@@ -961,60 +1151,69 @@ def main():
         _work_dir = os.getcwd()
     log('工作目录: %s' % _work_dir)
 
-    # ── Step 1: 输入大表文件名 ──
+    # ── 扫描所有可用文件 ──
+    all_files = _scan_work_dir(_work_dir)
+    if not all_files:
+        messagebox.showinfo('提示', '所在目录未找到 Excel/CSV 文件。')
+        log('未找到可用文件，退出')
+        _root.destroy()
+        return
+    log('扫描到 %d 个文件: %s' % (len(all_files), ', '.join(all_files)))
+
+    # ── 对话框一：选择模板文件 ──
+    template_name = _template_file_dialog(all_files)
+    if template_name is None:
+        log('用户取消模板选择，程序退出')
+        _root.destroy()
+        return
+
+    template_path = os.path.join(_work_dir, template_name)
+
+    # ── 读取并校验模板 ──
     while True:
-        big_input = simpledialog.askstring(
-            '输入大表文件名',
-            '请输入大表文件名:\n(不输入后缀将自动补全 .xlsx)',
-            parent=_root
-        )
-        if big_input is None:
-            log('用户取消，程序退出')
-            _root.destroy()
-            return
+        try:
+            _big_table_snapshot = _read_big_table(template_path)
+            break
+        except ValueError as e:
+            messagebox.showerror('模板校验失败', str(e))
+            template_name = _template_file_dialog(all_files)
+            if template_name is None:
+                log('用户取消模板选择，程序退出')
+                _root.destroy()
+                return
+            template_path = os.path.join(_work_dir, template_name)
+        except Exception as e:
+            messagebox.showerror('读取失败', '无法读取 %s:\n%s' % (template_name, e))
+            template_name = _template_file_dialog(all_files)
+            if template_name is None:
+                log('用户取消模板选择，程序退出')
+                _root.destroy()
+                return
+            template_path = os.path.join(_work_dir, template_name)
 
-        big_input = big_input.strip()
-        if not big_input:
-            continue
+    log('模板文件: %s' % template_name)
 
-        # 自动补全 .xlsx
-        if not big_input.lower().endswith('.xlsx'):
-            big_input += '.xlsx'
-
-        big_path = os.path.join(_work_dir, big_input)
-        if not os.path.isfile(big_path):
-            messagebox.showerror('文件不存在',
-                                 '未找到文件: %s\n请重新输入。' % big_input)
-            continue
-        break
-
-    big_filename = os.path.basename(big_path)
-    log('大表文件: %s' % big_filename)
-
-    # ── 读取大表快照 ──
-    try:
-        _big_table_snapshot = _read_big_table(big_path)
-    except ValueError as e:
-        messagebox.showerror('大表错误', str(e))
+    # ── 对话框二：选择待合并文件（排除模板）──
+    merge_candidates = [f for f in all_files if f != template_name]
+    if not merge_candidates:
+        messagebox.showinfo('提示', '除了模板外没有其他可合并的文件。')
+        log('无可合并文件，退出')
         _root.destroy()
         return
 
-    # ── Step 2: 扫描小表 ──
-    small_files = _scan_small_tables(big_filename, _work_dir)
-    if not small_files:
-        messagebox.showinfo('提示', '未找到小表文件（.xlsx）。')
-        log('未找到小表，退出')
+    small_files = _merge_files_dialog(merge_candidates, template_name)
+    if small_files is None:
+        log('用户取消文件选择，程序退出')
         _root.destroy()
         return
 
-    log('找到 %d 个小表: %s' % (len(small_files), ', '.join(small_files)))
+    log('待合并 %d 个文件: %s' % (len(small_files), ', '.join(small_files)))
 
-    # ── Step 3: 逐一处理小表 ──
-    # 结果 = 大表快照 + 小表数据追加
+    # ── 逐一处理待合并文件 ──
     from collections import OrderedDict
     result = OrderedDict()
     for sheet_name, snapshot_data in _big_table_snapshot.items():
-        result[sheet_name] = list(snapshot_data)  # 包含表头
+        result[sheet_name] = list(snapshot_data)
 
     success_count = 0
     for idx, small_file in enumerate(small_files, 1):
@@ -1027,14 +1226,13 @@ def main():
             log('  → 已跳过')
             continue
 
-        # 将缓存数据写入结果
         for sheet_name, rows in row_cache.items():
             result[sheet_name].extend(rows)
         success_count += 1
         log('  → 已合并 %d 行' % sum(len(r) for r in row_cache.values()))
 
     log('─' * 40)
-    log('合并完成: %d/%d 个小表成功合并, %d 个被取消' %
+    log('合并完成: %d/%d 个文件成功合并, %d 个被取消' %
         (success_count, len(small_files), len(_cancelled_tables)))
 
     if success_count == 0 and not _cancelled_tables:
