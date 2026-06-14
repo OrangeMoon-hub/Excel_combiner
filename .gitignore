@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 输出文件
+合并结果.xlsx
+合并日志.txt
+
+# 打包产物
+build/
+dist/
+*.spec
+*.exe
+
+# 系统文件
+Thumbs.db
+.DS_Store
+~$*.xlsx
