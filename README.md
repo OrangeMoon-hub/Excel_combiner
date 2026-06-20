@@ -1,9 +1,13 @@
 # Excel 小表并大表 — 智能合并工具
 
+[![AI Vibe-Coding](https://img.shields.io/badge/AI_Vibe--Coding-🤖-purple)](https://github.com/OrangeMoon-hub/Excel_combiner)
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](#零第三方依赖)
+[![Tested](https://img.shields.io/badge/Tested-19_Cases_+_5_E2E_Rounds-success.svg)](#验证记录)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+> 🤖 **这是一个 AI Vibe-Coding 项目。** 全部代码由 AI 助手生成，橙月君（数据岗位）负责需求定义、验收测试与业务场景验证。
+>
 > 双击运行、图形化对话框、零依赖。将多个结构相似的 Excel/CSV 数据文件按列名智能匹配合并到统一的模板表中。
 
 ---
@@ -78,6 +82,25 @@
 小表2.xlsx  NAME2   -       111               L       111,222       列名不存在于大表
 小表1.xlsx  NAME1   -       T                 K       落选值1,2     同名列未选择
 ```
+
+---
+
+## ✅ 验证记录
+
+> 本项目由 **数据岗位人员（橙月君）** 亲自验收每一步产出，确保结果可信赖。
+
+| 阶段 | 验证内容 | 结果 |
+|------|---------|------|
+| **单元测试** | 同名列三步判断（值一致→全填 / 数量相等→顺序 / 多于→弹窗）4 项 | ✅ 全部通过 |
+| **测试方案** | 19 项结构化测试用例，覆盖基本合并、同名列冲突、异常列处理、Sheet 匹配、特殊字符、多文件批量、取消合并等 | ✅ 全部通过 |
+| **E2E 第 1 轮** | 原始版本在 Windows 实机运行，修复 Excel 修复弹窗问题 | ✅ |
+| **E2E 第 2 轮** | 第二轮深挖 XML 命名空间覆盖问题（ns0 前缀） | ✅ |
+| **E2E 第 3 轮** | 同名列升级三步判断 + 异常记录信息密度提升（补前 5 行值） | ✅ |
+| **E2E 第 4 轮** | 图形化文件选择对话框 + CSV 支持 + 跨平台 tkinter 兼容 | ✅ |
+| **E2E 第 5 轮** | 最终端到端：Windows + Linux 双平台，实际业务数据跑通 | ✅ |
+| **手动验收** | 橙月君以真实数据岗位场景实测，逐功能点核对输出结果 | ✅ 可信赖 |
+
+> 共计 **19 个测试用例** 覆盖 6 大场景维度，**5 轮端到端回归**，**双平台（Windows/Linux）** 验证通过。
 
 ---
 
