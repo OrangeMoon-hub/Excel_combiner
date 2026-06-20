@@ -1,4 +1,4 @@
-# Excel 小表并大表 — 智能合并工具
+# Excel 小表并大表 — 智能合并工具V1.0
 
 [![AI Vibe-Coding](https://img.shields.io/badge/AI_Vibe--Coding-🤖-purple)](https://github.com/OrangeMoon-hub/Excel_combiner)
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
@@ -9,6 +9,7 @@
 > 🤖 **这是一个 AI Vibe-Coding 项目。** 全部代码由 AI 助手生成，橙月君（数据岗位）负责需求定义、验收测试与业务场景验证。
 >
 > 双击运行、图形化对话框、零依赖。将多个结构相似的 Excel/CSV 数据文件按列名智能匹配合并到统一的模板表中。
+> 目前项目仍在增加功能，故没有编译。各位访客可以下载“测试环境”文件夹中的excel和py脚本，放置在同一目录下运行测试；
 
 ---
 
