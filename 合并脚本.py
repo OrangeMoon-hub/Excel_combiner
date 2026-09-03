@@ -969,6 +969,84 @@ def _discarded_cols_dialog(filename, sheet_name, discarded_cols):
     return result['value']
 
 
+def _extra_sheet_map_dialog(filename, extra_sheets, big_sheet_names):
+    """（v1.4）Sheet 匹配兜底：小表存在、大表不存在的 Sheet，让用户映射到目标 Sheet。
+
+    返回:
+      dict: {extra_sheet: target_big_sheet} 或 None（表示取消合并该表）
+    """
+    _show_dialog_root()
+    result = {'value': None}
+
+    dlg = tk.Toplevel(_root)
+    dlg.title('Sheet 匹配 — %s' % filename)
+    dlg.resizable(False, True)
+    dlg.transient(_root)
+    dlg.grab_set()
+
+    try:
+        dlg.attributes('-topmost', True)
+    except Exception:
+        pass
+
+    try:
+        rx, ry = _root.winfo_x(), _root.winfo_y()
+    except Exception:
+        rx, ry = 100, 100
+    dlg.geometry('+%d+%d' % (rx + 80, ry + 80))
+
+    big_names_list = sorted(big_sheet_names)
+
+    tk.Label(dlg, text='Sheet 匹配', font=(_dialog_font()[0], 12, 'bold')
+             ).pack(padx=20, pady=15)
+    tk.Label(
+        dlg,
+        text='文件 %s 的以下 Sheet 在大表中不存在，\n请选择每个 Sheet 合并到大表的哪个 Sheet：' % filename,
+        justify=tk.LEFT, font=(_dialog_font()[0], 9), fg='#666'
+    ).pack(padx=20, pady=0)
+
+    map_vars = {}
+    for es in extra_sheets:
+        row = tk.Frame(dlg)
+        row.pack(fill=tk.X, padx=20, pady=4)
+        tk.Label(row, text='小表 Sheet「%s」→' % es, width=28, anchor=tk.W,
+                 font=(_dialog_font()[0], 10)).pack(side=tk.LEFT)
+        var = tk.StringVar(value=big_names_list[0] if big_names_list else '')
+        map_vars[es] = var
+        mb = tk.Menubutton(row, textvariable=var, width=22, anchor=tk.W,
+                           font=(_dialog_font()[0], 10), relief=tk.RAISED,
+                           borderwidth=1, bg='white', indicatoron=True)
+        menu = tk.Menu(mb, tearoff=0, font=(_dialog_font()[0], 10))
+        for bn in big_names_list:
+            menu.add_radiobutton(label=bn, variable=var, value=bn)
+        mb.configure(menu=menu)
+        mb.pack(side=tk.LEFT)
+
+    btn_frame = tk.Frame(dlg)
+    btn_frame.pack(pady=15, padx=20)
+
+    def _on_ok():
+        result['value'] = {es: var.get() for es, var in map_vars.items()}
+        dlg.destroy()
+
+    def _on_cancel_table():
+        result['value'] = None
+        dlg.destroy()
+
+    tk.Button(btn_frame, text='确定', width=12, command=_on_ok,
+              bg='#2e86c1', fg='white', font=(_dialog_font()[0], 10, 'bold')
+              ).pack(side=tk.LEFT, padx=5)
+    tk.Button(btn_frame, text='取消合并该表', width=16, command=_on_cancel_table,
+              font=(_dialog_font()[0], 10)).pack(side=tk.LEFT, padx=5)
+
+    try:
+        dlg.focus_force()
+    except Exception:
+        pass
+    dlg.wait_window()
+    return result['value']
+
+
 def _auto_fill_value(value):
     """自动填入时转换值类型"""
     if value is None or value == '':
@@ -1007,6 +1085,57 @@ def process_small_table(filepath, filename, big_snapshot):
 
     # Sheet 名称匹配
     matched_sheets = big_sheet_names & small_sheet_names
+
+    # （v1.4）Sheet 匹配兜底：小表有多余 Sheet 时弹窗让用户映射
+    extra_sheets = small_sheet_names - big_sheet_names
+    missing_sheets = big_sheet_names - small_sheet_names
+
+    if extra_sheets:
+        mapping = _extra_sheet_map_dialog(filename, sorted(extra_sheets), big_sheet_names)
+        if mapping is None:
+            log('  取消合并 %s: 用户在 Sheet 匹配弹窗中取消' % filename)
+            _cancelled_tables.append({'filename': filename, 'reason': '用户取消合并'})
+            _exceptions.append({
+                'filename': filename, 'sheet': '-', 'row_num': '-',
+                'col_name': '-', 'col1_pos': '-', 'col1_val': '-',
+                'col2_pos': '-', 'col2_val': '-',
+                'exc_type': '用户取消合并', 'action': '取消合并',
+            })
+            return False, None
+
+        # 将多余 Sheet 按映射合并到目标 Sheet（重建 small_sheets）
+        # 注意：extra sheet 映射到已存在 sheet 时，只拼接其数据行（去掉其表头），
+        # 避免出现两行表头。
+        candidate_sheets = {}
+        for sn, data in small_sheets.items():
+            target_sn = mapping.get(sn, sn)
+            if target_sn not in candidate_sheets:
+                candidate_sheets[target_sn] = {'header': None, 'rows': []}
+            bucket = candidate_sheets[target_sn]
+            if not data:
+                continue
+            header = data[0]
+            rows = data[1:]
+            if sn in extra_sheets:
+                # 这是被映射的多余 sheet：若目标已有表头，则去本表头；否则用本表头
+                if bucket['header'] is None:
+                    bucket['header'] = header
+                bucket['rows'].extend(rows)
+            else:
+                # 正常匹配的 sheet：表头以它为准
+                bucket['header'] = header
+                bucket['rows'] = bucket['rows'] + rows
+
+        new_small_sheets = {}
+        for sn, bucket in candidate_sheets.items():
+            hdr = bucket['header'] or []
+            new_small_sheets[sn] = [hdr] + bucket['rows']
+        small_sheets = new_small_sheets
+        small_sheet_names = set(small_sheets.keys())
+        matched_sheets = big_sheet_names & small_sheet_names
+        for es, ts in mapping.items():
+            log('  %s: Sheet「%s」→ 映射到「%s」' % (filename, es, ts))
+
     if not matched_sheets:
         log('跳过 %s: Sheet 名称与大表不匹配 (小表: %s, 大表: %s)' %
             (filename, ', '.join(small_sheet_names), ', '.join(big_sheet_names)))
