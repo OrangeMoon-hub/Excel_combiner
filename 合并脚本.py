@@ -1296,7 +1296,9 @@ def _mapping_overview_dialog(big_snapshot, small_files_info):
 
 def write_result_with_template(template_path, output_path, row_data_dict, big_snapshot):
     """（v1.5）基于模板用 openpyxl 写结果：保留模板全部 Sheet，
-    将 row_data_dict 中对应 sheet 的数据行追加到模板之后。
+    将 row_data_dict 中对应 sheet 的数据行【覆盖更新】到模板数据区。
+    数据从第 2 行开始逐格写入，覆盖模板原有的数据行/预置空行；
+    若新数据行数超过模板已有数据区，则向下扩展；若少于，则清空多余尾部行。
     写入前会先以 big_snapshot 的表头覆盖模板 Sheet 的现有表头行，
     确保「标注数据来源」时插入的「表名」列与数据行对齐。
     row_data_dict: {sheet_name: [row_values, ...]}
@@ -1314,11 +1316,24 @@ def write_result_with_template(template_path, output_path, row_data_dict, big_sn
                 # 覆盖第 1 行表头
                 for ci, hval in enumerate(header):
                     ws.cell(row=1, column=ci + 1, value=hval)
+            # ── 覆盖更新：数据从第 2 行开始逐格写入 ──
+            n_cols = max((len(r) for r in rows), default=0)
+            for ri, row_values in enumerate(rows):
+                dst_row = ri + 2  # 第 2 行起
+                for ci, val in enumerate(row_values):
+                    ws.cell(row=dst_row, column=ci + 1, value=val)
+            # 清空多余尾部行（模板原有数据区比新数据多出的部分）
+            old_max = ws.max_row
+            new_max = 1 + len(rows)
+            if old_max > new_max:
+                for rr in range(new_max + 1, old_max + 1):
+                    for cc in range(1, n_cols + 1):
+                        ws.cell(row=rr, column=cc, value=None)
         else:
             # 附加 sheet（异常记录/取消表等），新建，数据行含自己的表头
             ws = wb.create_sheet(title=sheet_name)
-        for row_values in rows:
-            ws.append(row_values)
+            for row_values in rows:
+                ws.append(row_values)
         written.append(sheet_name)
     wb.save(output_path)
     return written, wb.sheetnames
