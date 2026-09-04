@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
 Excel 小表并大表工具 — 将多个结构相似的 Excel 小表按列名匹配合并到大表模板中。
-零第三方依赖，仅使用 Python 标准库。
+模板读写使用 openpyxl（完整保留 Sheet/图表/公式/合并单元格/格式），小表解析使用标准库。
 """
 
 import os, sys, zipfile, io, time, traceback
 from xml.etree import ElementTree as ET
 import tkinter as tk
 from tkinter import messagebox, simpledialog
+
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
 
 # ── xlsx 命名空间 ──────────────────────────────────────────────
 NS_S = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
@@ -72,10 +77,43 @@ def read_csv(filepath):
 
 
 def read_table(filepath):
-    """根据后缀分发读取 xlsx 或 csv"""
+    """根据后缀分发读取 xlsx 或 csv。
+    xlsx 优先用 openpyxl（可读 inline strings / sharedStrings，与写回保持一致），
+    无 openpyxl 时回退到标准库手写解析。"""
     if filepath.lower().endswith('.csv'):
         return read_csv(filepath)
+    if openpyxl is not None:
+        try:
+            return read_xlsx_openpyxl(filepath)
+        except Exception as e:
+            # 回退到标准库解析
+            log('  openpyxl 读取失败(%s)，回退到标准库解析: %s' % (e, os.path.basename(filepath)))
+            return read_xlsx(filepath)
     return read_xlsx(filepath)
+
+
+def read_xlsx_openpyxl(filepath):
+    """用 openpyxl 读取 xlsx，返回 {sheet_name: [header_row, data_row1, ...]}。
+    所有值统一转为字符串（None→''），与标准库 read_xlsx 输出类型一致，
+    以保证列名匹配时模板与小表类型一致。"""
+    wb = openpyxl.load_workbook(filepath, data_only=False, read_only=True)
+    result = {}
+    for ws in wb.worksheets:
+        sheet_data = []
+        for row in ws.iter_rows(values_only=True):
+            # 转字符串，None/空 → ''
+            row_values = []
+            for v in row:
+                if v is None:
+                    row_values.append('')
+                else:
+                    row_values.append(str(v))
+            # 过滤全空行
+            if any(v != '' for v in row_values):
+                sheet_data.append(row_values)
+        result[ws.title] = sheet_data
+    wb.close()
+    return result
 
 
 def read_xlsx(filepath):
@@ -1069,10 +1107,229 @@ def _auto_fill_value(value):
     return value
 
 
-def process_small_table(filepath, filename, big_snapshot):
+# ───────────────────────────────────────────────────────────────────
+#  v1.5：openpyxl 模板读写 + 匹配总览确认
+# ───────────────────────────────────────────────────────────────────
+
+def _load_template_workbook(filepath):
+    """用 openpyxl 载入完整模板工作簿（保留所有 Sheet/图表/公式/合并单元格/格式）。
+    返回 openpyxl Workbook 对象。若未安装 openpyxl 则抛 RuntimeError。"""
+    if openpyxl is None:
+        raise RuntimeError('缺少 openpyxl 依赖。请先安装：pip install openpyxl')
+    wb = openpyxl.load_workbook(filepath, data_only=False)
+    return wb
+
+
+def _normalize_header(header):
+    """表头归一化（仅用于列名匹配度提示的展示，不改匹配逻辑）。
+    去掉首尾空白。"""
+    return ['' if c is None else str(c).strip() for c in (header or [])]
+
+
+def _column_match_ratio(small_header, big_header):
+    """计算小表列名与候选大表 Sheet 的精确列名匹配度。
+    返回 (match_count, small_total)。分母=小表列列数（排除空列名）。"""
+    small_norm = [h for h in _normalize_header(small_header) if h != '']
+    big_norm = set(_normalize_header(big_header))
+    if not small_norm:
+        return 0, 0
+    matched = sum(1 for h in small_norm if h in big_norm)
+    return matched, len(small_norm)
+
+
+def _build_sheet_mapping(big_snapshot, small_files_info):
+    """建立「小表→大表」的 sheet 映射初始值（精确 sheet 名匹配）。
+    small_files_info: [(filename, {small_sheet: small_header}), ...]
+    返回 {filename: {small_sheet: target_big_sheet_or_None}}，未匹配的置 None。"""
+    big_sheet_names = set(big_snapshot.keys())
+    mapping = {}
+    for filename, small_headers in small_files_info:
+        entry = {}
+        for sn in small_headers:
+            entry[sn] = sn if sn in big_sheet_names else None
+        mapping[filename] = entry
+    return mapping
+
+
+def _mapping_overview_dialog(big_snapshot, small_files_info):
+    """（v1.5）匹配总览确认对话框。
+    平铺、默认全部展开，展示所有小表每个 Sheet 的匹配状态；
+    未匹配的 Sheet 提供下拉框手动指认目标大表 Sheet（实时显示列名匹配度）。
+    返回：
+      dict: {filename: {small_sheet: target_big_sheet}} —— 用户确认后的映射（确认）
+      None —— 用户取消（不写任何文件）
+    """
+    _show_dialog_root()
+    big_names_list = sorted(big_snapshot.keys())
+
+    dlg = tk.Toplevel(_root)
+    dlg.title('匹配总览确认')
+    dlg.resizable(False, True)
+    dlg.transient(_root)
+    dlg.grab_set()
+    try:
+        dlg.attributes('-topmost', True)
+    except Exception:
+        pass
+    try:
+        rx, ry = _root.winfo_x(), _root.winfo_y()
+    except Exception:
+        rx, ry = 100, 100
+    dlg.geometry('+%d+%d' % (rx + 40, ry + 40))
+
+    font_name, font_size = _dialog_font()
+
+    # 顶部说明
+    tk.Label(dlg, text='匹配总览', font=(font_name, 13, 'bold')
+             ).pack(padx=20, pady=(15, 4))
+    tk.Label(
+        dlg,
+        text='绿色 ✅ 已自动匹配；黄色 ⚠️ 未匹配的可手动选择目标 Sheet。\n'
+             '切换时显示「列名匹配度（匹配列数/小表总列数）」供参考，确认后才会写入。',
+        justify=tk.LEFT, font=(font_name, 9), fg='#666', anchor=tk.W
+    ).pack(padx=20, pady=(0, 8), fill=tk.X)
+
+    # 可滚动容器（表多时能滚动）
+    canvas = tk.Canvas(dlg, width=560, height=420, highlightthickness=0)
+    vbar = tk.Scrollbar(dlg, orient=tk.VERTICAL, command=canvas.yview)
+    canvas.configure(yscrollcommand=vbar.set)
+    vbar.pack(side=tk.RIGHT, fill=tk.Y)
+    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(20, 0), pady=(0, 8))
+    inner = tk.Frame(canvas)
+    canvas.create_window((0, 0), window=inner, anchor='nw')
+
+    # 每行的状态/下拉变量
+    row_vars = []  # (filename, small_sheet, status_label, var, ratio_label)
+
+    def _refresh_ratio(ratio_label, small_header, var):
+        target = var.get()
+        if target in ('', '（跳过，不合并）'):
+            ratio_label.config(text='')
+            return
+        if target in big_snapshot:
+            big_header = big_snapshot[target][0]
+            m, total = _column_match_ratio(small_header, big_header)
+            ratio_label.config(text='%d/%d' % (m, total))
+        else:
+            ratio_label.config(text='')
+
+    for filename, small_headers in small_files_info:
+        # 文件标题行
+        fhead = tk.Label(inner, text='▼ %s' % filename,
+                        font=(font_name, 10, 'bold'), fg='#333', anchor=tk.W)
+        fhead.pack(fill=tk.X, padx=4, pady=(8, 2))
+
+        for sn, small_header in small_headers.items():
+            row = tk.Frame(inner)
+            row.pack(fill=tk.X, padx=4, pady=2)
+
+            is_matched = sn in big_snapshot
+            status_txt = '✅' if is_matched else '⚠️'
+            status_lbl = tk.Label(row, text=status_txt, width=3,
+                                  font=(font_name, 11))
+            status_lbl.pack(side=tk.LEFT)
+
+            tk.Label(row, text='「%s」' % sn, width=24, anchor=tk.W,
+                     font=(font_name, 10)).pack(side=tk.LEFT)
+
+            var = tk.StringVar(value=sn if is_matched else '')
+            choices = big_names_list + ['（跳过，不合并）']
+            mb = tk.Menubutton(row, textvariable=var, width=24, anchor=tk.W,
+                               font=(font_name, 10), relief=tk.RAISED,
+                               borderwidth=1, bg='white', indicatoron=True)
+            menu = tk.Menu(mb, tearoff=0, font=(font_name, 10))
+            for bn in choices:
+                menu.add_radiobutton(label=bn, variable=var, value=bn)
+            mb.configure(menu=menu)
+            mb.pack(side=tk.LEFT)
+
+            ratio_lbl = tk.Label(row, text='', width=8, anchor=tk.W,
+                                 font=(font_name, 10), fg='#2e86c1')
+            ratio_lbl.pack(side=tk.LEFT, padx=(6, 0))
+
+            if is_matched:
+                m, total = _column_match_ratio(small_header, big_snapshot[sn][0])
+                ratio_lbl.config(text='%d/%d' % (m, total))
+
+            # 绑定实时刷新
+            def _make_cb(ratio_lbl=ratio_lbl, sh=small_header, v=var):
+                var.trace_add('write', lambda *a: _refresh_ratio(ratio_lbl, sh, v))
+            _make_cb()
+
+            row_vars.append((filename, sn, status_lbl, var))
+
+    inner.update_idletasks()
+    canvas.configure(scrollregion=canvas.bbox('all'))
+
+    # 底部按钮
+    btn_frame = tk.Frame(dlg)
+    btn_frame.pack(pady=(0, 15), padx=20)
+    result = {'value': None}
+
+    def _on_confirm():
+        out = {}
+        for filename, sn, status_lbl, var in row_vars:
+            target = var.get()
+            if target == '（跳过，不合并）' or target == '':
+                target = None
+            out.setdefault(filename, {})[sn] = target
+        result['value'] = out
+        dlg.destroy()
+
+    def _on_cancel():
+        result['value'] = None
+        dlg.destroy()
+
+    tk.Button(btn_frame, text='确认合并', width=14, command=_on_confirm,
+              bg='#27ae60', fg='white', font=(font_name, 10, 'bold')
+              ).pack(side=tk.LEFT, padx=5)
+    tk.Button(btn_frame, text='取消', width=12, command=_on_cancel,
+              font=(font_name, 10)).pack(side=tk.LEFT, padx=5)
+
+    try:
+        dlg.focus_force()
+    except Exception:
+        pass
+    dlg.wait_window()
+    return result['value']
+
+
+def write_result_with_template(template_path, output_path, row_data_dict, big_snapshot):
+    """（v1.5）基于模板用 openpyxl 写结果：保留模板全部 Sheet，
+    将 row_data_dict 中对应 sheet 的数据行追加到模板之后。
+    写入前会先以 big_snapshot 的表头覆盖模板 Sheet 的现有表头行，
+    确保「标注数据来源」时插入的「表名」列与数据行对齐。
+    row_data_dict: {sheet_name: [row_values, ...]}
+    返回 (written_sheets, all_sheet_names)。"""
+    wb = _load_template_workbook(template_path)
+    written = []
+    for sheet_name, rows in (row_data_dict or {}).items():
+        if not rows:
+            continue
+        if sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            # 用 big_snapshot 的表头覆盖模板表头（保证表头与数据行对齐）
+            header = big_snapshot.get(sheet_name, [[]])[0]
+            if header:
+                # 覆盖第 1 行表头
+                for ci, hval in enumerate(header):
+                    ws.cell(row=1, column=ci + 1, value=hval)
+        else:
+            # 附加 sheet（异常记录/取消表等），新建，数据行含自己的表头
+            ws = wb.create_sheet(title=sheet_name)
+        for row_values in rows:
+            ws.append(row_values)
+        written.append(sheet_name)
+    wb.save(output_path)
+    return written, wb.sheetnames
+
+
+def process_small_table(filepath, filename, big_snapshot, sheet_mapping=None):
     """
     处理一个小表，返回 (success, row_data_dict) 或 (False, None) 表示取消。
-    row_data_dict: {sheet_name: [row_values, ...]}
+    row_data_dict: {sheet_name: [row_values, ...]}  （sheet_name 为大表 sheet 名）
+    sheet_mapping: {small_sheet: target_big_sheet}，target 为 None 表示跳过该 sheet。
+        默认 None 时回退到 v1.4 的逐表弹窗逻辑。
     """
     try:
         small_sheets = read_table(filepath)
@@ -1083,32 +1340,17 @@ def process_small_table(filepath, filename, big_snapshot):
     big_sheet_names = set(big_snapshot.keys())
     small_sheet_names = set(small_sheets.keys())
 
-    # Sheet 名称匹配
-    matched_sheets = big_sheet_names & small_sheet_names
-
-    # （v1.4）Sheet 匹配兜底：小表有多余 Sheet 时弹窗让用户映射
-    extra_sheets = small_sheet_names - big_sheet_names
-    missing_sheets = big_sheet_names - small_sheet_names
-
-    if extra_sheets:
-        mapping = _extra_sheet_map_dialog(filename, sorted(extra_sheets), big_sheet_names)
-        if mapping is None:
-            log('  取消合并 %s: 用户在 Sheet 匹配弹窗中取消' % filename)
-            _cancelled_tables.append({'filename': filename, 'reason': '用户取消合并'})
-            _exceptions.append({
-                'filename': filename, 'sheet': '-', 'row_num': '-',
-                'col_name': '-', 'col1_pos': '-', 'col1_val': '-',
-                'col2_pos': '-', 'col2_val': '-',
-                'exc_type': '用户取消合并', 'action': '取消合并',
-            })
-            return False, None
-
-        # 将多余 Sheet 按映射合并到目标 Sheet（重建 small_sheets）
-        # 注意：extra sheet 映射到已存在 sheet 时，只拼接其数据行（去掉其表头），
-        # 避免出现两行表头。
+    # ── v1.5：若提供了预映射，则用预映射驱动；否则走 v1.4 弹窗 ──
+    if sheet_mapping is not None:
+        # 依据映射重建 small_sheets：把每个 small sheet 落到目标大表 sheet
         candidate_sheets = {}
+        skipped = []
         for sn, data in small_sheets.items():
-            target_sn = mapping.get(sn, sn)
+            target_sn = sheet_mapping.get(sn)
+            if target_sn is None:
+                skipped.append(sn)
+                log('  %s: Sheet「%s」→ 跳过（用户在总览中未匹配）' % (filename, sn))
+                continue
             if target_sn not in candidate_sheets:
                 candidate_sheets[target_sn] = {'header': None, 'rows': []}
             bucket = candidate_sheets[target_sn]
@@ -1116,25 +1358,61 @@ def process_small_table(filepath, filename, big_snapshot):
                 continue
             header = data[0]
             rows = data[1:]
-            if sn in extra_sheets:
-                # 这是被映射的多余 sheet：若目标已有表头，则去本表头；否则用本表头
-                if bucket['header'] is None:
-                    bucket['header'] = header
-                bucket['rows'].extend(rows)
-            else:
-                # 正常匹配的 sheet：表头以它为准
+            # 同一目标只保留一个表头（以首个非空表头为准）
+            if bucket['header'] is None:
                 bucket['header'] = header
-                bucket['rows'] = bucket['rows'] + rows
+            bucket['rows'].extend(rows)
+            if sn != target_sn:
+                log('  %s: Sheet「%s」→ 映射到「%s」' % (filename, sn, target_sn))
 
         new_small_sheets = {}
         for sn, bucket in candidate_sheets.items():
             hdr = bucket['header'] or []
             new_small_sheets[sn] = [hdr] + bucket['rows']
         small_sheets = new_small_sheets
-        small_sheet_names = set(small_sheets.keys())
-        matched_sheets = big_sheet_names & small_sheet_names
-        for es, ts in mapping.items():
-            log('  %s: Sheet「%s」→ 映射到「%s」' % (filename, es, ts))
+    else:
+        extra_sheets = small_sheet_names - big_sheet_names
+        if extra_sheets:
+            mapping = _extra_sheet_map_dialog(filename, sorted(extra_sheets), big_sheet_names)
+            if mapping is None:
+                log('  取消合并 %s: 用户在 Sheet 匹配弹窗中取消' % filename)
+                _cancelled_tables.append({'filename': filename, 'reason': '用户取消合并'})
+                _exceptions.append({
+                    'filename': filename, 'sheet': '-', 'row_num': '-',
+                    'col_name': '-', 'col1_pos': '-', 'col1_val': '-',
+                    'col2_pos': '-', 'col2_val': '-',
+                    'exc_type': '用户取消合并', 'action': '取消合并',
+                })
+                return False, None
+
+            candidate_sheets = {}
+            for sn, data in small_sheets.items():
+                target_sn = mapping.get(sn, sn)
+                if target_sn not in candidate_sheets:
+                    candidate_sheets[target_sn] = {'header': None, 'rows': []}
+                bucket = candidate_sheets[target_sn]
+                if not data:
+                    continue
+                header = data[0]
+                rows = data[1:]
+                if sn in extra_sheets:
+                    if bucket['header'] is None:
+                        bucket['header'] = header
+                    bucket['rows'].extend(rows)
+                else:
+                    bucket['header'] = header
+                    bucket['rows'] = bucket['rows'] + rows
+
+            new_small_sheets = {}
+            for sn, bucket in candidate_sheets.items():
+                hdr = bucket['header'] or []
+                new_small_sheets[sn] = [hdr] + bucket['rows']
+            small_sheets = new_small_sheets
+            for es, ts in mapping.items():
+                log('  %s: Sheet「%s」→ 映射到「%s」' % (filename, es, ts))
+
+    small_sheet_names = set(small_sheets.keys())
+    matched_sheets = big_sheet_names & small_sheet_names
 
     if not matched_sheets:
         log('跳过 %s: Sheet 名称与大表不匹配 (小表: %s, 大表: %s)' %
@@ -1383,19 +1661,53 @@ def main():
 
     log('待合并 %d 个文件: %s' % (len(small_files), ', '.join(small_files)))
 
+    # ── v1.5：读取所有小表，建立匹配总览并让用户确认映射 ──
+    small_files_info = []  # [(filename, {small_sheet: small_header}), ...]
+    readable_small_files = []
+    for small_file in small_files:
+        p = os.path.join(_work_dir, small_file)
+        try:
+            sheets = read_table(p)
+        except Exception as e:
+            log('错误: 读取 %s 失败 - %s，跳过' % (small_file, e))
+            continue
+        headers = {sn: (data[0] if data else []) for sn, data in sheets.items()}
+        if not headers:
+            continue
+        small_files_info.append((small_file, headers))
+        readable_small_files.append(small_file)
+
+    if not small_files_info:
+        messagebox.showinfo('提示', '没有可读取的小表数据。')
+        log('无可用小表，退出')
+        _root.destroy()
+        return
+    small_files = readable_small_files
+
+    overview = _mapping_overview_dialog(_big_table_snapshot, small_files_info)
+    if overview is None:
+        log('用户在匹配总览中取消，程序退出（未写入任何文件）')
+        write_log(os.path.join(_work_dir, '合并日志.txt'))
+        _root.destroy()
+        return
+    log('匹配总览已确认')
+
     # ── 逐一处理待合并文件 ──
     from collections import OrderedDict
+    # 仅收集合并数据行（不含表头，表头已在模板中）
     result = OrderedDict()
-    for sheet_name, snapshot_data in _big_table_snapshot.items():
-        result[sheet_name] = list(snapshot_data)
+    for sheet_name in _big_table_snapshot:
+        result[sheet_name] = []
 
     success_count = 0
     for idx, small_file in enumerate(small_files, 1):
         log('─' * 40)
         log('[%d/%d] 正在处理: %s' % (idx, len(small_files), small_file))
         small_path = os.path.join(_work_dir, small_file)
+        sheet_mapping = overview.get(small_file, None)
 
-        ok, row_cache = process_small_table(small_path, small_file, _big_table_snapshot)
+        ok, row_cache = process_small_table(
+            small_path, small_file, _big_table_snapshot, sheet_mapping=sheet_mapping)
         if not ok:
             log('  → 已跳过')
             continue
@@ -1424,13 +1736,13 @@ def main():
         counter += 1
     log('输出文件: %s' % os.path.basename(output_path))
 
-    # 构建输出 sheets
+    # 构建输出 sheets（仅数据行，不含模板表头）
     output_sheets = OrderedDict()
     for sheet_name, data_rows in result.items():
         if data_rows:
             output_sheets[sheet_name] = data_rows
 
-    # 异常记录表
+    # 异常记录表（附加 sheet，含表头）
     if _exceptions:
         exc_header = ['文件名', 'Sheet', '行号', '列名', '列1位置', '列1值',
                       '列2位置(若同名)', '列2值(若同名)', '异常类型', '用户操作']
@@ -1450,7 +1762,7 @@ def main():
             ])
         output_sheets['异常记录'] = exc_rows
 
-    # 取消合并的表名
+    # 取消合并的表名（附加 sheet，含表头）
     if _cancelled_tables:
         cancel_header = ['被取消的表名', '取消原因']
         cancel_rows = [cancel_header]
@@ -1459,9 +1771,12 @@ def main():
         output_sheets['取消合并的表名'] = cancel_rows
 
     try:
-        write_xlsx(output_path, output_sheets)
+        written_sheets, all_sheet_names = write_result_with_template(
+            template_path, output_path, output_sheets, _big_table_snapshot)
         log('✅ 已生成: %s' % output_path)
-        log('  Sheet 列表: %s' % ', '.join(output_sheets.keys()))
+        log('  数据写入 Sheet: %s' % ', '.join(written_sheets))
+        log('  保留模板全部 Sheet: %s (含图表/公式/合并单元格/格式)' %
+            ', '.join(all_sheet_names))
     except Exception as e:
         messagebox.showerror('写入失败',
                              '无法写入 %s:\n%s\n'
