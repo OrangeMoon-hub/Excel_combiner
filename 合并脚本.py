@@ -1086,24 +1086,12 @@ def _extra_sheet_map_dialog(filename, extra_sheets, big_sheet_names):
 
 
 def _auto_fill_value(value):
-    """自动填入时转换值类型"""
+    """自动填入时规整值类型（原样保留，不做数值类型转换）。
+    不要在此处做 int/float 转换：工号/OA上级工号/出生日期/入职日期/年度等
+    都是「看似数字的文本」，转数值会丢失前导零（如 '01040001'→1040001），
+    破坏 8 位工号与日期格式。原样保留字符串即可由 openpyxl 正确落盘。"""
     if value is None or value == '':
         return ''
-    # 尝试转为数字
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped or stripped == '-':
-            return value
-        # 尝试 int
-        try:
-            return int(stripped)
-        except ValueError:
-            pass
-        # 尝试 float
-        try:
-            return float(stripped)
-        except ValueError:
-            pass
     return value
 
 
