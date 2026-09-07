@@ -76,9 +76,15 @@ def read_csv(filepath):
     return {'Sheet1': rows}
 
 
+def _is_xlsx_like(filepath):
+    """判断是否 xlsx/xlsm/xls 等电子表格文件（用于读取分发）。"""
+    low = filepath.lower()
+    return low.endswith('.xlsx') or low.endswith('.xlsm') or low.endswith('.xls')
+
+
 def read_table(filepath):
-    """根据后缀分发读取 xlsx 或 csv。
-    xlsx 优先用 openpyxl（可读 inline strings / sharedStrings，与写回保持一致），
+    """根据后缀分发读取 xlsx/xlsm 或 csv。
+    xlsx/xlsm 优先用 openpyxl（可读 inline strings / sharedStrings，与写回保持一致），
     无 openpyxl 时回退到标准库手写解析。"""
     if filepath.lower().endswith('.csv'):
         return read_csv(filepath)
@@ -339,20 +345,22 @@ _add_source_column = True  # 是否自动插入"表名"列标注数据来源（�
 
 
 def _basename_no_ext(filename):
-    """去除最后一个 .xlsx 后缀"""
+    """去除最后一个 .xlsx / .xlsm 后缀"""
     if filename.lower().endswith('.xlsx'):
+        return filename[:-5]
+    if filename.lower().endswith('.xlsm'):
         return filename[:-5]
     return os.path.splitext(filename)[0]
 
 
 def _scan_work_dir(work_dir):
-    """扫描工作目录下所有 .xlsx / .csv 文件，排除 ~$ 临时文件"""
+    """扫描工作目录下所有 .xlsx / .xlsm / .csv 文件，排除 ~$ 临时文件"""
     files = []
     for f in os.listdir(work_dir):
         if f.startswith('~$'):
             continue
         low = f.lower()
-        if low.endswith('.xlsx') or low.endswith('.csv'):
+        if low.endswith('.xlsx') or low.endswith('.xlsm') or low.endswith('.csv'):
             files.append(f)
     return sorted(files)
 
@@ -1101,10 +1109,12 @@ def _auto_fill_value(value):
 
 def _load_template_workbook(filepath):
     """用 openpyxl 载入完整模板工作簿（保留所有 Sheet/图表/公式/合并单元格/格式）。
-    返回 openpyxl Workbook 对象。若未安装 openpyxl 则抛 RuntimeError。"""
+    返回 openpyxl Workbook 对象。若未安装 openpyxl 则抛 RuntimeError。
+    .xlsm 宏工作簿用 keep_vba=True 保留 VBA 宏。"""
     if openpyxl is None:
         raise RuntimeError('缺少 openpyxl 依赖。请先安装：pip install openpyxl')
-    wb = openpyxl.load_workbook(filepath, data_only=False)
+    keep_vba = filepath.lower().endswith('.xlsm')
+    wb = openpyxl.load_workbook(filepath, data_only=False, keep_vba=keep_vba)
     return wb
 
 
