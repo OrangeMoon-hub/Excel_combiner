@@ -1741,11 +1741,14 @@ def main():
         return
 
     # ── Step 4: 生成结果文件 ──
+    # 输出格式跟随模板：模板是 .xlsm 就生成 .xlsm，否则默认 .xlsx
+    _template_ext = os.path.splitext(template_path)[1].lower()
+    out_ext = _template_ext if _template_ext in ('.xlsm', '.xlsx') else '.xlsx'
     base_name = os.path.join(_work_dir, '合并结果')
-    output_path = f'{base_name}.xlsx'
+    output_path = f'{base_name}{out_ext}'
     counter = 2
     while os.path.exists(output_path):
-        output_path = f'{base_name}_{counter}.xlsx'
+        output_path = f'{base_name}_{counter}{out_ext}'
         counter += 1
     log('输出文件: %s' % os.path.basename(output_path))
 
