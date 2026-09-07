@@ -100,10 +100,25 @@ def read_xlsx(filepath):
                 ref = c.get('r', '')
                 v_el = c.find('{%s}v' % NS_S)
                 val = v_el.text if v_el is not None else ''
-                if cell_type == 's' and val and val.isdigit():
-                    idx_s = int(val)
-                    if idx_s < len(shared_strings):
-                        val = shared_strings[idx_s]
+                if cell_type == 's':
+                    # 共享字符串索引
+                    if val and val.isdigit():
+                        idx_s = int(val)
+                        if idx_s < len(shared_strings):
+                            val = shared_strings[idx_s]
+                elif cell_type == 'inlineStr':
+                    # 内联字符串：<is><t>文本</t></is>（无 <v>）
+                    is_el = c.find('{%s}is' % NS_S)
+                    if is_el is not None:
+                        val = ''.join(
+                            (t.text or '') for t in is_el.iter('{%s}t' % NS_S)
+                        )
+                elif cell_type == 'str':
+                    # 公式计算结果为字符串：<v> 里直接就是文本
+                    pass
+                elif cell_type == 'b':
+                    # 布尔：1=TRUE 0=FALSE
+                    val = 'TRUE' if val == '1' else ('FALSE' if val == '0' else val)
                 ci, _ = _parse_cell_ref(ref)
                 cell_positions[ci] = val
             if not cell_positions:
