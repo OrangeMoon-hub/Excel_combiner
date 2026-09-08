@@ -100,10 +100,25 @@ def read_xlsx(filepath):
                 ref = c.get('r', '')
                 v_el = c.find('{%s}v' % NS_S)
                 val = v_el.text if v_el is not None else ''
-                if cell_type == 's' and val and val.isdigit():
-                    idx_s = int(val)
-                    if idx_s < len(shared_strings):
-                        val = shared_strings[idx_s]
+                if cell_type == 's':
+                    # 共享字符串索引
+                    if val and val.isdigit():
+                        idx_s = int(val)
+                        if idx_s < len(shared_strings):
+                            val = shared_strings[idx_s]
+                elif cell_type == 'inlineStr':
+                    # 内联字符串：<is><t>文本</t></is>（无 <v>）
+                    is_el = c.find('{%s}is' % NS_S)
+                    if is_el is not None:
+                        val = ''.join(
+                            (t.text or '') for t in is_el.iter('{%s}t' % NS_S)
+                        )
+                elif cell_type == 'str':
+                    # 公式计算结果为字符串：<v> 里直接就是文本
+                    pass
+                elif cell_type == 'b':
+                    # 布尔：1=TRUE 0=FALSE
+                    val = 'TRUE' if val == '1' else ('FALSE' if val == '0' else val)
                 ci, _ = _parse_cell_ref(ref)
                 cell_positions[ci] = val
             if not cell_positions:
@@ -401,6 +416,8 @@ def _configure_split_dialog(filepath):
     filename = os.path.basename(filepath)
 
     # ── 构建 UI ──
+    rename_var = tk.BooleanVar(value=False)
+
     dlg = tk.Toplevel(_root)
     dlg.title('Sheet 拆分配置')
     dlg.resizable(False, True)
@@ -499,6 +516,35 @@ def _configure_split_dialog(filepath):
         if not check_vars[sn].get():
             _on_sheet_toggle(sn)
 
+    # ── Sheet 重命名选项（v1.4：仅单 Sheet 时可用）──
+    rename_frame = tk.Frame(dlg)
+    rename_frame.pack(pady=6, padx=20, anchor=tk.W)
+    rename_chk = tk.Checkbutton(
+        rename_frame, variable=rename_var, text='以拆分列值重命名 Sheet（仅单个 Sheet 时可用）',
+        font=(_dialog_font()[0], 9), anchor=tk.W
+    )
+    rename_chk.pack(side=tk.LEFT)
+
+    def _refresh_rename_state():
+        selected_count = sum(1 for sn, _, _ in sheet_info if check_vars[sn].get())
+        if selected_count == 1:
+            rename_chk.configure(state=tk.NORMAL)
+        else:
+            rename_var.set(False)
+            rename_chk.configure(state=tk.DISABLED)
+
+    # 将 rename 状态刷新绑定到 sheet 勾选变化
+    _orig_toggle = _on_sheet_toggle
+    def _on_sheet_toggle_wrapped(sn):
+        _orig_toggle(sn)
+        _refresh_rename_state()
+
+    # 重绑 checkbutton 的 command
+    for sn, _, _ in sheet_info:
+        check_vars[sn].trace_add('write', lambda *a, _sn=sn: _refresh_rename_state())
+
+    _refresh_rename_state()
+
     # 按钮
     btn_frame = tk.Frame(dlg)
     btn_frame.pack(pady=10, padx=20)
@@ -515,7 +561,7 @@ def _configure_split_dialog(filepath):
         if not selected:
             messagebox.showwarning('提示', '请至少勾选一个 Sheet 进行拆分。')
             return
-        result['value'] = selected
+        result['value'] = (selected, rename_var.get())
         dlg.destroy()
 
     tk.Button(btn_frame, text='← 上一步', width=12, command=_on_back,
@@ -542,12 +588,13 @@ def _configure_split_dialog(filepath):
 #  核心拆分逻辑
 # ══════════════════════════════════════════════════════════════════
 
-def split_tables(filepath, sheet_configs):
+def split_tables(filepath, sheet_configs, rename_sheet=False):
     """按 sheet_configs 拆分大表。
 
     参数:
       filepath: str
       sheet_configs: {sheet_name: split_col_name}
+      rename_sheet: bool（v1.4 预留，改名在 main 写入阶段处理）
 
     返回:
       {safe_value: {original_sheet_name: [header_row, data_row1, ...]}}
@@ -699,14 +746,14 @@ def main():
     filepath = os.path.join(work_dir, selected_file)
 
     # 对话框二：Sheet 配置
-    sheet_configs = _configure_split_dialog(filepath)
-    if sheet_configs is None:
+    dialog_result = _configure_split_dialog(filepath)
+    if dialog_result is None:
         log('用户取消拆分配置，程序退出')
         _root.destroy()
         return
 
     # 上一步支持
-    while sheet_configs == '__BACK__':
+    while dialog_result == '__BACK__':
         log('用户返回上一步')
         selected_file = _select_file_dialog(all_files)
         if selected_file is None:
@@ -715,13 +762,14 @@ def main():
             return
         log(f'选择大表: {selected_file}')
         filepath = os.path.join(work_dir, selected_file)
-        sheet_configs = _configure_split_dialog(filepath)
-        if sheet_configs is None:
+        dialog_result = _configure_split_dialog(filepath)
+        if dialog_result is None:
             log('用户取消拆分配置，程序退出')
             _root.destroy()
             return
 
-    log(f'拆分配置: {sheet_configs}')
+    sheet_configs, rename_sheet = dialog_result
+    log(f'拆分配置: {sheet_configs}, 重命名Sheet: {rename_sheet}')
 
     # 自动递增输出目录
     base_dir = os.path.join(work_dir, '拆分输出')
@@ -734,7 +782,7 @@ def main():
     log(f'输出目录: {os.path.basename(output_dir)}/')
 
     # 拆分
-    split_result = split_tables(filepath, sheet_configs)
+    split_result = split_tables(filepath, sheet_configs, rename_sheet=rename_sheet)
     if not split_result:
         messagebox.showinfo('提示', '拆分后没有生成任何文件。\n请检查拆分列的值是否为空。')
         log('无拆分结果，退出')
@@ -748,9 +796,15 @@ def main():
         output_path = os.path.join(output_dir, f'{safe_val}.xlsx')
         try:
             ordered_sheets = OrderedDict()
-            for sn in sheet_configs:
-                if sn in sheets_data and sheets_data[sn]:
-                    ordered_sheets[sn] = sheets_data[sn]
+            if rename_sheet and len(sheet_configs) == 1:
+                # v1.4：单 Sheet 时，Sheet 名 = 拆分列值（= 文件名 safe_val）
+                only_sn = next(iter(sheet_configs))
+                if only_sn in sheets_data and sheets_data[only_sn]:
+                    ordered_sheets[safe_val] = sheets_data[only_sn]
+            else:
+                for sn in sheet_configs:
+                    if sn in sheets_data and sheets_data[sn]:
+                        ordered_sheets[sn] = sheets_data[sn]
             if ordered_sheets:
                 write_xlsx(output_path, ordered_sheets)
                 total_rows = sum(len(rows) - 1 for rows in ordered_sheets.values())

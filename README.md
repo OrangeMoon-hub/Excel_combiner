@@ -1,14 +1,13 @@
-# Excel 小表并大表 — 智能合并 & 拆分工具 V1.3
+# Excel 小表并大表 — 智能合并 & 拆分工具 V1.5
 
 [![AI Vibe-Coding](https://img.shields.io/badge/AI_Vibe--Coding-🤖-purple)](https://github.com/OrangeMoon-hub/Excel_combiner)
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
-[![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](#零第三方依赖)
 [![Tested](https://img.shields.io/badge/Tested-19_Cases_+_5_E2E_Rounds-success.svg)](#验证记录)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 > 🤖 **这是一个 AI Vibe-Coding 项目。** 全部代码由 AI 助手生成，橙月君（数据岗位）负责需求定义、验收测试与业务场景验证。
 >
-> 双击运行、图形化对话框、零依赖。提供两大核心能力：**小表合并到大表** + **大表按列值拆分**，搭配使用可完成「导出→拆分→合并→数据刷新」的完整工作流。
+> 双击运行、图形化对话框。提供两大核心能力：**小表合并到大表** + **大表按列值拆分**，搭配使用可完成「导出→拆分→合并→数据刷新」的完整工作流。
 >
 > 目前项目仍在增加功能，故没有编译。各位访客可以下载"测试环境"文件夹中的 excel 和 py 脚本，放置在同一目录下运行测试。
 
@@ -23,10 +22,10 @@
 | 痛点 | 解决 |
 |------|------|
 | 列名不一致 | 自动匹配 + 检测异常（丢失列/多余列/同名列冲突） |
-| 格式难统一 | 以模板表为基准，严格按列对齐 |
+| 格式难统一 | 以模板表为基准，严格按列对齐；openpyxl 保真写入，样式/宏不丢 |
 | 出错了不知道 | 生成完整异常记录表，逐条可追溯 |
 | 不会写代码 | 双击 exe，图形化对话框，零编程门槛 |
-| 装环境麻烦 | 零第三方依赖，仅用 Python 标准库，单文件 exe |
+| 装环境麻烦 | 纯 Python 标准库即可运行；openpyxl 可选（缺失自动降级） |
 | 大表需要拆分 | 内置拆分脚本，按列值一键拆分多 Sheet 大表 |
 
 ---
@@ -52,6 +51,17 @@
       ▼
   生成 合并结果.xlsx（含异常记录 & 审计日志）
 ```
+
+**V1.4 新增：**
+- 拆分 → 合并闭环 Sheet 名策略，两脚本无缝衔接
+
+**V1.5 新增：**
+- openpyxl 模板保真写入：完整保留 Sheet/样式/图表/公式/合并单元格/格式
+- 匹配总览确认：合并前展示匹配结果，确认后再执行
+- 合并结果覆盖更新（修复在职/试用期数据被追加到空行区之后）
+- 修复工号 / OA 上级工号等文本数字列前导零丢失
+- 兼容 inlineStr 内联字符串（修复 MINISO 花名册读取为空/无列名）
+- **支持 `.xlsm` 宏工作簿**：可作为模板/小表，`keep_vba` 保留宏；结果格式跟随模板（`.xlsm` 模板 → `.xlsm` 结果，实现"填数据"体验）
 
 **V1.3 新增：**
 - "标注数据来源"可选（checkbox，默认勾上，向前兼容）
@@ -187,10 +197,11 @@
 |------|------|
 | 语言 | Python 3.8+ |
 | GUI | tkinter（标准库） |
-| Excel 读写 | zipfile + xml.etree（标准库，纯 Python 解析/写入 xlsx） |
+| Excel 解析 | zipfile + xml.etree（标准库，纯 Python 解析 xlsx） |
+| Excel 写入 | openpyxl（保真写入模板，可选依赖，缺失自动降级） |
 | CSV 读取 | csv（标准库） |
 | 打包 | PyInstaller `--onefile` |
-| 依赖 | **零第三方库** |
+| 依赖 | 标准库即可运行；**openpyxl 仅需在保真写入时安装** |
 
 ---
 
@@ -198,8 +209,8 @@
 
 ```
 Excel_combiner/
-├── 合并脚本.py                          # 正向合并工具（零依赖）
-├── 拆分脚本.py                          # 大表拆分工具（零依赖）
+├── 合并脚本.py                          # 正向合并工具（标准库 + 可选 openpyxl）
+├── 拆分脚本.py                          # 大表拆分工具（标准库）
 ├── PRD_Excel小表并大表工具.md            # 产品需求文档
 ├── AI_CONTEXT.md                       # AI 项目记忆文件
 ├── 测试文档/
@@ -223,26 +234,36 @@ Excel_combiner/
 ### 直接运行
 
 ```bash
+# 仅需标准库（Python 自带）即可启动
 python 合并脚本.py
 python 拆分脚本.py
 ```
 
+> 💡 **v1.5 起**：若需「模板保真写入 / `.xlsm` 宏保留」能力，请额外安装 openpyxl：
+>
+> ```bash
+> pip install openpyxl
+> ```
+>
+> 未安装 openpyxl 时脚本会自动降级为标准库读写模式（v1.3 的能力），不影响基本合并拆分。
+
 ### 打包为 exe
 
 ```bash
-pip install pyinstaller
+pip install pyinstaller openpyxl
 pyinstaller --onefile --console 合并脚本.py
 pyinstaller --onefile --console 拆分脚本.py
 ```
 
 > 使用 `--console` 保留控制台窗口，方便查看进度和日志。
+> 打包 exe 时如需保真写入，请先 `pip install openpyxl`，PyInstaller 会自动将其打入。
 
 ---
 
 ## ⚠️ 约束 & 边界
 
 - **合并脚本**：模板文件第 1 列如勾选"标注数据来源"则必须为 `表名`
-- Excel 仅支持 `.xlsx` 格式（不支持 `.xls`）
+- Excel 支持 `.xlsx` / `.xlsm` 宏工作簿（不支持 `.xls`）
 - CSV 以 UTF-8 读取，映射到虚拟 Sheet `Sheet1`，仅当模板含同名 Sheet 时匹配
 - Windows tkinter 不支持 `pady=tuple` 写法（`pady=(15,5)` 报 `bad screen distance`），间距必须用单整数
 - **拆分脚本**：Sheet 名最长 31 字符（Excel 限制），非法文件名字符自动替换
