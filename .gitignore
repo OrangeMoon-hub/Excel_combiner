@@ -17,3 +17,7 @@ dist/
 Thumbs.db
 .DS_Store
 ~$*.xlsx
+
+# 运行时日志（服务器无 GUI 环境运行时的报错）
+错误日志.txt
+*.log
