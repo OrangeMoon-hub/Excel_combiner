@@ -626,7 +626,7 @@ def _resolve_dup_with_big(small_header, data_rows, dup_col_names,
       Step 2: 小表同名列数量 == 大表同名列数量 → 按列顺序依次对应填入
       Step 3: 小表同名列数量 > 大表同名列数量 → 对大表每一个同名列弹窗选择
     返回 (big_to_small, cancelled)
-      big_to_small: {big_col_idx: small_col_idx} 大表列位置到小表列位置的映射
+      big_to_small: {big_col_idx: small_col_idx or None}，None 明确表示忽略并留空
     """
     big_to_small = {}
 
@@ -683,7 +683,9 @@ def _resolve_dup_with_big(small_header, data_rows, dup_col_names,
                 log('  %s / %s: 同名列「%s」大表第%d/%d列 → 小表 %s 列' %
                     (filename, sheet_name, col_name,
                      big_idx_pos + 1, n_big, _col_letter(choice)))
-            # 'ignore' → 此大表列留空，不记异常（由最终落选判断）
+            elif choice == 'ignore':
+                # 显式保存留空决定，避免后续又回退到第一列。
+                big_to_small[bi] = None
 
         # 所有弹窗结束后，记录真正落选的小表列
         used_small = set(v for k, v in big_to_small.items() if k in big_idxs)
@@ -1319,14 +1321,18 @@ def write_result_with_template(template_path, output_path, row_data_dict, big_sn
             for ri, row_values in enumerate(rows):
                 dst_row = ri + 2  # 第 2 行起
                 for ci, val in enumerate(row_values):
-                    ws.cell(row=dst_row, column=ci + 1, value=val)
+                    ws.cell(row=dst_row, column=ci + 1).value = val
             # 清空多余尾部行（模板原有数据区比新数据多出的部分）
             old_max = ws.max_row
             new_max = 1 + len(rows)
             if old_max > new_max:
                 for rr in range(new_max + 1, old_max + 1):
                     for cc in range(1, n_cols + 1):
-                        ws.cell(row=rr, column=cc, value=None)
+                        cell = ws.cell(row=rr, column=cc)
+                        # cell(..., value=None) 只取单元格，不会清空已有值。
+                        # 合并区域的非左上角单元格本来就没有值，保留其结构。
+                        if not isinstance(cell, openpyxl.cell.cell.MergedCell):
+                            cell.value = None
         else:
             # 附加 sheet（异常记录/取消表等），新建，数据行含自己的表头
             ws = wb.create_sheet(title=sheet_name)
@@ -1353,41 +1359,17 @@ def process_small_table(filepath, filename, big_snapshot, sheet_mapping=None):
     big_sheet_names = set(big_snapshot.keys())
     small_sheet_names = set(small_sheets.keys())
 
-    # ── v1.5：若提供了预映射，则用预映射驱动；否则走 v1.4 弹窗 ──
+    # 保留每个来源 Sheet 的表头，完成各自列映射后再追加到目标。
+    # 直接把不同来源的数据行拼到第一个表头下，会把列序不同的表写错列。
+    mapped_sheets = []  # [(source_sheet, target_sheet, data)]
     if sheet_mapping is not None:
-        # 依据映射重建 small_sheets：把每个 small sheet 落到目标大表 sheet
-        candidate_sheets = {}
-        skipped = []
-        for sn, data in small_sheets.items():
-            target_sn = sheet_mapping.get(sn)
-            if target_sn is None:
-                skipped.append(sn)
-                log('  %s: Sheet「%s」→ 跳过（用户在总览中未匹配）' % (filename, sn))
-                continue
-            if target_sn not in candidate_sheets:
-                candidate_sheets[target_sn] = {'header': None, 'rows': []}
-            bucket = candidate_sheets[target_sn]
-            if not data:
-                continue
-            header = data[0]
-            rows = data[1:]
-            # 同一目标只保留一个表头（以首个非空表头为准）
-            if bucket['header'] is None:
-                bucket['header'] = header
-            bucket['rows'].extend(rows)
-            if sn != target_sn:
-                log('  %s: Sheet「%s」→ 映射到「%s」' % (filename, sn, target_sn))
-
-        new_small_sheets = {}
-        for sn, bucket in candidate_sheets.items():
-            hdr = bucket['header'] or []
-            new_small_sheets[sn] = [hdr] + bucket['rows']
-        small_sheets = new_small_sheets
+        mapping = sheet_mapping
     else:
+        mapping = {sn: sn for sn in small_sheets}
         extra_sheets = small_sheet_names - big_sheet_names
         if extra_sheets:
-            mapping = _extra_sheet_map_dialog(filename, sorted(extra_sheets), big_sheet_names)
-            if mapping is None:
+            extra_mapping = _extra_sheet_map_dialog(filename, sorted(extra_sheets), big_sheet_names)
+            if extra_mapping is None:
                 log('  取消合并 %s: 用户在 Sheet 匹配弹窗中取消' % filename)
                 _cancelled_tables.append({'filename': filename, 'reason': '用户取消合并'})
                 _exceptions.append({
@@ -1398,34 +1380,18 @@ def process_small_table(filepath, filename, big_snapshot, sheet_mapping=None):
                 })
                 return False, None
 
-            candidate_sheets = {}
-            for sn, data in small_sheets.items():
-                target_sn = mapping.get(sn, sn)
-                if target_sn not in candidate_sheets:
-                    candidate_sheets[target_sn] = {'header': None, 'rows': []}
-                bucket = candidate_sheets[target_sn]
-                if not data:
-                    continue
-                header = data[0]
-                rows = data[1:]
-                if sn in extra_sheets:
-                    if bucket['header'] is None:
-                        bucket['header'] = header
-                    bucket['rows'].extend(rows)
-                else:
-                    bucket['header'] = header
-                    bucket['rows'] = bucket['rows'] + rows
+            mapping.update(extra_mapping)
 
-            new_small_sheets = {}
-            for sn, bucket in candidate_sheets.items():
-                hdr = bucket['header'] or []
-                new_small_sheets[sn] = [hdr] + bucket['rows']
-            small_sheets = new_small_sheets
-            for es, ts in mapping.items():
-                log('  %s: Sheet「%s」→ 映射到「%s」' % (filename, es, ts))
+    for sn, data in small_sheets.items():
+        target_sn = mapping.get(sn)
+        if target_sn not in big_sheet_names:
+            log('  %s: Sheet「%s」→ 跳过（未匹配有效目标）' % (filename, sn))
+            continue
+        mapped_sheets.append((sn, target_sn, data))
+        if sn != target_sn:
+            log('  %s: Sheet「%s」→ 映射到「%s」' % (filename, sn, target_sn))
 
-    small_sheet_names = set(small_sheets.keys())
-    matched_sheets = big_sheet_names & small_sheet_names
+    matched_sheets = {target for _, target, _ in mapped_sheets}
 
     if not matched_sheets:
         log('跳过 %s: Sheet 名称与大表不匹配 (小表: %s, 大表: %s)' %
@@ -1441,20 +1407,15 @@ def process_small_table(filepath, filename, big_snapshot, sheet_mapping=None):
                                '小表 %s 的 Sheet 名称与大表不一致，已跳过。' % filename)
         return False, None
 
-    # 记录多余/缺少的 Sheet
-    extra_sheets = small_sheet_names - big_sheet_names
-    missing_sheets = big_sheet_names - small_sheet_names
+    # 未有来源映射的目标 Sheet 保留原样。
+    missing_sheets = big_sheet_names - matched_sheets
     if missing_sheets:
         log('  %s 缺少 Sheet: %s，跳过' % (filename, ', '.join(missing_sheets)))
-    if extra_sheets:
-        log('  %s 多余 Sheet: %s，忽略' % (filename, ', '.join(extra_sheets)))
-
     # 缓存当前小表的所有结果行
-    row_cache = {sn: [] for sn in matched_sheets}
+    row_cache = {sn: [] for sn in big_snapshot if sn in matched_sheets}
 
-    for sheet_name in matched_sheets:
-        big_header = big_snapshot[sheet_name][0]  # 大表表头
-        small_data = small_sheets[sheet_name]
+    for sheet_name, target_sheet, small_data in mapped_sheets:
+        big_header = big_snapshot[target_sheet][0]  # 目标表头；日志仍用来源 Sheet 名
 
         if not small_data or not small_data[0]:
             log('  %s / %s: 无表头，跳过' % (filename, sheet_name))
@@ -1578,7 +1539,7 @@ def process_small_table(filepath, filename, big_snapshot, sheet_mapping=None):
                 elif bi in big_to_small:
                     # 通过大表列位置映射到小表列位置
                     si = big_to_small[bi]
-                    val = row[si] if si < len(row) else ''
+                    val = row[si] if si is not None and si < len(row) else ''
                     out_row.append(_auto_fill_value(val))
                 elif big_col_name in small_col_groups:
                     si = small_col_groups[big_col_name][0]
@@ -1587,7 +1548,7 @@ def process_small_table(filepath, filename, big_snapshot, sheet_mapping=None):
                 else:
                     out_row.append('')
 
-            row_cache[sheet_name].append(out_row)
+            row_cache[target_sheet].append(out_row)
 
     return True, row_cache
 

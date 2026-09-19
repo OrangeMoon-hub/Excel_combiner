@@ -294,6 +294,13 @@ def sanitize_filename(name):
         name = name[:31]
     if not name:
         name = '_空值_'
+    # Windows 设备名即使带扩展名也不能用作普通文件名。
+    reserved = {'CON', 'PRN', 'AUX', 'NUL'}
+    reserved.update('COM%d' % i for i in range(1, 10))
+    reserved.update('LPT%d' % i for i in range(1, 10))
+    if name.split('.')[0].upper() in reserved:
+        name = '_' + name
+    name = name[:31].rstrip('. ')
     return name
 
 
@@ -654,17 +661,17 @@ def split_tables(filepath, sheet_configs, rename_sheet=False):
                     log(f'  Sheet "{sheet_name}" 拆分列值为空，跳过行: {preview}...')
                 continue
 
-            safe_val = sanitize_filename(val)
             new_row = [str(row[i]) if i < len(row) and row[i] is not None else ''
                        for i in range(len(row)) if i != split_idx]
 
-            if safe_val not in sheet_groups[sheet_name]:
-                sheet_groups[sheet_name][safe_val] = [new_header]
-            sheet_groups[sheet_name][safe_val].append(new_row)
+            # 分组使用原始业务值，文件名清理不能改变分组身份。
+            if val not in sheet_groups[sheet_name]:
+                sheet_groups[sheet_name][val] = [new_header]
+            sheet_groups[sheet_name][val].append(new_row)
 
-            if safe_val not in value_sheets:
-                value_sheets[safe_val] = set()
-            value_sheets[safe_val].add(sheet_name)
+            if val not in value_sheets:
+                value_sheets[val] = set()
+            value_sheets[val].add(sheet_name)
 
         rows_added = sum(len(grp) - 1 for grp in sheet_groups[sheet_name].values())
         if sheet_skipped > 0:
@@ -678,12 +685,23 @@ def split_tables(filepath, sheet_configs, rename_sheet=False):
 
     # 构建最终输出
     result = {}
-    all_selected_sheets = set(sheet_configs.keys())
-    for safe_val in value_sheets:
+    all_selected_sheets = list(sheet_configs)
+    used_filenames = set()
+    for val in value_sheets:
+        base_name = sanitize_filename(val)
+        safe_val = base_name
+        counter = 2
+        # 所有 Sheet 共用一次命名分配；兼顾 Windows 大小写不敏感路径。
+        while safe_val.casefold() in used_filenames:
+            suffix = '_%d' % counter
+            safe_val = base_name[:31 - len(suffix)] + suffix
+            counter += 1
+        used_filenames.add(safe_val.casefold())
+        log('  拆分值「%s」→ 文件「%s.xlsx」' % (val, safe_val))
         result[safe_val] = {}
         for sn in all_selected_sheets:
-            if sn in sheet_groups and safe_val in sheet_groups[sn]:
-                result[safe_val][sn] = sheet_groups[sn][safe_val]
+            if sn in sheet_groups and val in sheet_groups[sn]:
+                result[safe_val][sn] = sheet_groups[sn][val]
             else:
                 # 无匹配行 → 仅保留表头
                 data = all_sheets.get(sn)

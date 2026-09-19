@@ -1,5 +1,12 @@
 # AI_CONTEXT.md — Excel Combiner 项目记忆文件
 
+## 2026-09-19 更新：1.65
+
+已修复多 Sheet 汇总错列、覆盖后旧尾行残留、拆分名称冲突混组/覆盖，以及同名列“忽略(留空)”失效。
+新增 `tests/test_regressions.py`（29 项文件级回归）、GitHub Actions（Windows/Linux × Python 3.8/3.13）和 `requirements.txt`。
+合并写入需要 openpyxl，未实现无依赖写入降级。运行测试：`python -m unittest discover -s tests -v`。
+以下历史记录中的代码行号、零依赖目标、“无自动化回归”等描述保留供追溯，当前行为以代码、README 和 CHANGELOG 为准。反向填表尚未实现。
+
 > 📅 生成日期: 2026-06-21  
 > 🦞 维护者: 皮皮 (AI Assistant) + 橙月君 (Product Owner)  
 > 🎯 项目代号: Excel小表并大表 / Excel Combiner  

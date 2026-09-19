@@ -1,9 +1,20 @@
-# Excel 小表并大表 — 智能合并 & 拆分工具 V1.5
+# Excel 小表并大表 — 智能合并 & 拆分工具 V1.65
 
 [![AI Vibe-Coding](https://img.shields.io/badge/AI_Vibe--Coding-🤖-purple)](https://github.com/OrangeMoon-hub/Excel_combiner)
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 [![Tested](https://img.shields.io/badge/Tested-19_Cases_+_5_E2E_Rounds-success.svg)](#验证记录)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Data integrity tests](https://github.com/OrangeMoon-hub/Excel_combiner/actions/workflows/tests.yml/badge.svg)](https://github.com/OrangeMoon-hub/Excel_combiner/actions/workflows/tests.yml)
+
+## 1.65 数据正确性修复
+
+- 修复多个 Sheet 映射到同一目标时，因列序不同导致姓名、金额等数据错列。
+- 修复覆盖更新后多余的旧数据没有清空。
+- 修复拆分值清理为相同文件名时混合分组或覆盖文件的问题，自动分配不重名的文件名并记录对应关系。
+- 修复同名列选择“忽略(留空)”后仍填入第一列的值。
+- 新增 29 项文件级自动化回归测试及 Windows/Linux CI。历史手工验收记录与本次自动化测试分开保留。
+
+详见 [更新记录](CHANGELOG.md)。标签 `1.65` 用于浏览、下载及恢复本版本代码。
 
 > 💥 **把几十张 Excel 合并成一张，几秒钟搞定 —— 而不是花一下午一个个复制粘贴。**
 >
@@ -27,7 +38,7 @@
 | 格式难统一 | 以模板表为基准，严格按列对齐；openpyxl 保真写入，样式/宏不丢 |
 | 出错了不知道 | 生成完整异常记录表，逐条可追溯 |
 | 不会写代码 | 双击 exe，图形化对话框，零编程门槛 |
-| 装环境麻烦 | 纯 Python 标准库即可运行；openpyxl 可选（缺失自动降级） |
+| 装环境麻烦 | 拆分工具使用标准库；合并工具通过 requirements.txt 安装 openpyxl |
 | 大表需要拆分 | 内置拆分脚本，按列值一键拆分多 Sheet 大表 |
 
 ---
@@ -212,11 +223,11 @@
 |------|------|
 | 语言 | Python 3.8+ |
 | GUI | tkinter（标准库） |
-| Excel 解析 | zipfile + xml.etree（标准库，纯 Python 解析 xlsx） |
-| Excel 写入 | openpyxl（保真写入模板，可选依赖，缺失自动降级） |
+| Excel 解析 | 合并优先使用 openpyxl；拆分使用 zipfile + xml.etree |
+| Excel 写入 | 合并使用 openpyxl 写入模板；拆分使用标准库 |
 | CSV 读取 | csv（标准库） |
 | 打包 | PyInstaller `--onefile` |
-| 依赖 | 标准库即可运行；**openpyxl 仅需在保真写入时安装** |
+| 依赖 | **合并和自动化测试需要 openpyxl**；拆分无需第三方依赖 |
 
 ---
 
@@ -224,10 +235,14 @@
 
 ```
 Excel_combiner/
-├── 合并脚本.py                          # 正向合并工具（标准库 + 可选 openpyxl）
+├── 合并脚本.py                          # 正向合并工具（需要 openpyxl）
 ├── 拆分脚本.py                          # 大表拆分工具（标准库）
 ├── PRD_Excel小表并大表工具.md            # 产品需求文档
 ├── AI_CONTEXT.md                       # AI 项目记忆（坑位记录 + 反向填表设计）
+├── requirements.txt                    # 合并工具和测试的依赖
+├── CHANGELOG.md                        # 版本修复记录与标签使用说明
+├── tests/test_regressions.py            # 文件级自动化回归测试
+├── .github/workflows/tests.yml          # Windows/Linux 自动运行测试
 ├── 测试文档/
 │   └── 测试方案.md                      # 19 项结构化测试用例
 ├── 测试环境/                            # 可运行样例数据（下载后即可跑通）
@@ -249,18 +264,23 @@ Excel_combiner/
 ### 直接运行
 
 ```bash
-# 仅需标准库（Python 自带）即可启动
+python -m pip install -r requirements.txt
 python 合并脚本.py
 python 拆分脚本.py
 ```
 
-> 💡 **v1.5 起**：若需「模板保真写入 / `.xlsm` 宏保留」能力，请额外安装 openpyxl：
->
-> ```bash
-> pip install openpyxl
-> ```
->
-> 未安装 openpyxl 时脚本会自动降级为标准库读写模式（v1.3 的能力），不影响基本合并拆分。
+> 合并工具的模板写入需要 openpyxl；缺少依赖时不能完成合并输出。拆分工具仍可仅用标准库运行。
+
+### 自动化测试
+
+```bash
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
+```
+
+测试会在临时目录创建 Excel/CSV 样例，调用实际处理函数，再打开输出核对值。弹窗选择由测试模拟，不需要弹出窗口或启动 Excel。覆盖多 Sheet 映射、覆盖清空、拆分分组与文件名冲突、同名列选择，以及 CSV BOM、空行和前导零。
+
+每次推送分支或提交 PR 时，GitHub Actions 自动运行 Windows/Linux × Python 3.8/3.13 四种组合。完整 GUI 操作、VBA 与复杂图表仍需单独验收。
 
 ### 打包为 exe
 
@@ -333,7 +353,7 @@ pyinstaller --onefile --console 拆分脚本.py
 | 项 | 说明 | 优先级 |
 |----|------|--------|
 | 单文件膨胀 | 合并脚本约 1300+ 行单文件，模块边界模糊，新功能难插入 | P2 |
-| 无自动化测试框架 | 全靠手动 + E2E，无 pytest 回归，重构风险高 | P2 |
+| 自动化测试覆盖扩展 | 1.65 已新增 29 项 unittest 和 CI；GUI、宏、复杂格式及性能仍待补测 | P2 |
 | Excel 命名空间兼容不确定 | `ns0` 前缀已修复，但未验证覆盖所有 Excel 版本 | P2 |
 | 无配置文件 | 行为全硬编码，无用户自定义选项 | P3 |
 | 关联脚手架项目 | `/home/ubuntu/excel-editor/` 空项目，疑似规划中的模块化重构，未启动 | 备注 |

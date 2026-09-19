@@ -1,0 +1,2 @@
+# Required by the merge tool and the file-based regression tests.
+openpyxl==3.1.5
