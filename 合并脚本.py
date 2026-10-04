@@ -11,8 +11,10 @@ from tkinter import messagebox, simpledialog
 
 try:
     import openpyxl
+    from openpyxl.workbook.properties import CalcProperties
 except ImportError:
     openpyxl = None
+    CalcProperties = None
 
 # ── xlsx 命名空间 ──────────────────────────────────────────────
 NS_S = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
@@ -1361,6 +1363,11 @@ def write_result_with_template(template_path, output_path, row_data_dict, big_sn
         written.append(sheet_name)
     # 模板中未被覆盖的公式仍由 Excel/WPS 重新计算；输入小表公式已经在读取时
     # 转成缓存值，不会以错位公式写入。显式计算属性也避免旧缓存链干扰打开。
+    # Some valid third-party workbooks omit the optional workbook ``calcPr``
+    # element, which openpyxl represents as ``None``.  Create it before setting
+    # recalculation flags so such templates can still be saved normally.
+    if wb.calculation is None:
+        wb.calculation = CalcProperties()
     wb.calculation.calcMode = 'auto'
     wb.calculation.fullCalcOnLoad = True
     wb.calculation.forceFullCalc = True

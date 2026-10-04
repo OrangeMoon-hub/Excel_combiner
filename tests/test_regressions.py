@@ -95,6 +95,24 @@ class FileTestCase(unittest.TestCase):
                 archive.writestr(name, data)
         rewritten.replace(source)
 
+    def remove_calculation_properties(self, filepath):
+        """Simulate a valid third-party workbook that omits workbook calcPr."""
+        source = Path(filepath)
+        target_part = 'xl/workbook.xml'
+        with zipfile.ZipFile(source, 'r') as archive:
+            members = {name: archive.read(name) for name in archive.namelist()}
+        root = ET.fromstring(members[target_part])
+        ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+        calc_properties = root.find('{%s}calcPr' % ns)
+        if calc_properties is not None:
+            root.remove(calc_properties)
+        members[target_part] = ET.tostring(root, encoding='utf-8', xml_declaration=True)
+        rewritten = source.with_suffix('.rewritten.xlsx')
+        with zipfile.ZipFile(rewritten, 'w', zipfile.ZIP_DEFLATED) as archive:
+            for name, data in members.items():
+                archive.writestr(name, data)
+        rewritten.replace(source)
+
     def merge_files(self, template, source, mapping):
         snapshot = merge._read_big_table(template)
         ok, rows = merge.process_small_table(source, Path(source).name, snapshot, mapping)
@@ -206,6 +224,18 @@ class SheetMappingTests(FileTestCase):
 
 
 class TemplateWritingTests(FileTestCase):
+    def test_merge_adds_calculation_properties_when_template_omits_them(self):
+        template = self.workbook('template.xlsx', {'人员': [['姓名']]})
+        self.remove_calculation_properties(template)
+        source = self.workbook('source.xlsx', {'人员': [['姓名'], ['张三']]})
+
+        result = self.merge_files(template, source, {'人员': '人员'})
+
+        self.assertEqual(result['人员']['A2'].value, '张三')
+        self.assertEqual(result.calculation.calcMode, 'auto')
+        self.assertTrue(result.calculation.fullCalcOnLoad)
+        self.assertTrue(result.calculation.forceFullCalc)
+
     def test_merge_uses_cached_value_instead_of_reordered_formula(self):
         template = self.workbook('template.xlsx', {
             '人员': [['数量', '价格', '差额']],
