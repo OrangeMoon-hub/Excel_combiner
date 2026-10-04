@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-大表拆分工具 v1.66 — 按指定列值将大表拆分为多个小表。
+大表拆分工具 v1.7 — 按指定列值将大表拆分为多个小表。
 每个 Sheet 独立选择拆分依据列，输出文件名=列值，Sheet名=原始Sheet名。
 使用 openpyxl 生成有效工作簿并调整拆分后的公式引用。独立运行，不依赖合并脚本。
 """
@@ -11,7 +11,7 @@ import tkinter as tk
 from tkinter import messagebox
 from collections import OrderedDict
 
-APP_VERSION = '1.66'
+APP_VERSION = '1.7'
 
 try:
     import openpyxl
@@ -697,6 +697,26 @@ def split_tables(filepath, sheet_configs, rename_sheet=False):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  v1.7 核心适配层
+# ══════════════════════════════════════════════════════════════════
+# GUI 只收集拆分配置和展示结果；实际读取、分组、公式移动与写出共享核心。
+from excel_combiner import split_core as _split_core
+
+
+def split_tables(filepath, sheet_configs, rename_sheet=False):
+    try:
+        return _split_core.split_tables(
+            filepath, sheet_configs, rename_sheet=rename_sheet, logger=log)
+    except Exception as exc:
+        log('  ❌ 拆分失败: %s' % exc)
+        return {}
+
+
+def write_xlsx(filepath, sheets_data):
+    return _split_core.write_xlsx(filepath, sheets_data, logger=log)
+
+
+# ══════════════════════════════════════════════════════════════════
 #  主流程
 # ══════════════════════════════════════════════════════════════════
 
@@ -825,6 +845,12 @@ def main():
     _root.destroy()
 
 
+if __name__ == '__main__' and '--version' in sys.argv:
+    print('Excel Combiner 拆分工具 %s' % APP_VERSION)
+    raise SystemExit(0)
+if __name__ == '__main__' and ('--help' in sys.argv or '-h' in sys.argv):
+    print('用法: 拆分脚本.py\n直接运行时打开图形界面。\n--version  显示版本号')
+    raise SystemExit(0)
 if __name__ == '__main__':
     try:
         main()

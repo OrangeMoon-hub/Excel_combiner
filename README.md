@@ -1,23 +1,23 @@
-# Excel 小表并大表 — 智能合并 & 拆分工具 V1.66
+# Excel 小表并大表 — 智能合并 & 拆分工具 V1.7
 
 [![AI Vibe-Coding](https://img.shields.io/badge/AI_Vibe--Coding-🤖-purple)](https://github.com/OrangeMoon-hub/Excel_combiner)
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Data integrity tests](https://github.com/OrangeMoon-hub/Excel_combiner/actions/workflows/tests.yml/badge.svg)](https://github.com/OrangeMoon-hub/Excel_combiner/actions/workflows/tests.yml)
 
-## 1.66 公式安全与文件有效性修复
+## 1.7 可信内核与自动化入口
 
-- 合并时不再复制待合并文件中的公式，而是按列名写入公式最后保存的计算值，避免列序变化后引用错位。
-- 拆分时保留公式，并随筛选后的行号和删除拆分列后的列号调整标准 A1 引用。
-- 输出统一由 openpyxl 生成并设置自动重算；模板缺少可选计算属性时自动补建。
-- 两个 Python 程序同步声明版本号，自动化检查代码与发布文档版本一致。
-- 当前共有 35 项文件级回归测试，并在 Windows/Linux、Python 3.8/3.13 上运行。
+- 合并、拆分业务处理已提取到不导入 tkinter 的 `excel_combiner` 核心包；原有两个图形入口继续可用，并调用同一核心。
+- 新增受支持的 `python -m excel_combiner` 命令行入口，可无弹窗执行合并或拆分，适合重复任务和自动验收。
+- CLI 对缺失文件、未映射 Sheet、无效拆分列和需要人工决定的数据丢弃风险返回明确的非零退出码，不把失败结果当成功。
+- 当前共有 48 项自动化测试，其中 13 项检查 CLI 独立进程和核心边界；原有 35 项文件级回归全部保留。
+- Windows CI 构建合并、拆分两个 PyInstaller EXE，并用 `--version` 完成最小启动冒烟。
 
-详见 [更新记录](CHANGELOG.md)。[标签 `1.66`](https://github.com/OrangeMoon-hub/Excel_combiner/tree/1.66) 用于浏览和下载该版本；让主分支恢复其内容时应创建新的恢复提交，以保留历史。
+详见 [更新记录](CHANGELOG.md) 和 [v1.7 版本 PRD](docs/prd/v1.7.md)。发布标签只在测试和验收完成、代码合入 `main` 后创建。
 
 > **批量合并或拆分 Excel，减少重复复制粘贴，并把程序发现的数据异常记录下来。**
 >
-> 工具提供图形化操作，并以模板工作簿为基础写入数据。1.66 已自动验证主要数据正确性和公式移动场景；复杂图表、绘图形状、VBA 运行效果和完整 GUI 流程不在当前自动验证范围内。
+> 工具提供图形化操作和 CLI，并以模板工作簿为基础写入数据。1.7 已自动验证主要数据正确性、公式移动和 CLI 黑盒场景；复杂图表、绘图形状、VBA 运行效果和完整 GUI 点击流程不在当前自动验证范围内。
 >
 > 🤖 这是一个 AI 辅助开发项目：需求来自真实的数据工作场景。当前可信范围以本 README 的“验证记录”和“约束与边界”为准。
 
@@ -36,7 +36,7 @@
 | 列名不一致 | 自动匹配 + 检测异常（丢失列/多余列/同名列冲突） |
 | 格式难统一 | 以模板表为基础写入；合并输入公式按缓存值导入，拆分公式随行列移动调整；复杂对象见下方边界 |
 | 出错了不知道 | 对程序已检测的异常生成记录表和日志 |
-| 不会写代码 | 提供 tkinter 图形化对话框；可直接运行 Python 脚本，也可自行打包为 exe |
+| 不会写代码 | 提供 tkinter 图形化对话框；开发和自动化人员可使用正式 CLI |
 | 装环境麻烦 | 两个工具共用 requirements.txt 中固定版本的 openpyxl |
 | 大表需要拆分 | 内置拆分脚本，按列值一键拆分多 Sheet 大表 |
 
@@ -123,6 +123,31 @@
 - 输出文件夹自动递增防覆盖（`拆分输出_2/`...）
 - 非法文件名字符自动替换，空值行自动跳过
 
+### ⌨️ CLI（高级与自动化入口）
+
+CLI 与两个 GUI 入口调用同一套核心处理逻辑，全程不弹窗。所有可能影响结果的路径和 Sheet 选择必须显式提供；遇到未确认的额外列、同名列歧义等情况会停止并说明原因。
+
+```bash
+# 查看帮助和版本
+python -m excel_combiner --help
+python -m excel_combiner --version
+
+# 合并：--input 可重复，--sheet-map 可重复
+python -m excel_combiner merge \
+  --template 模板.xlsx \
+  --input 小表.xlsx \
+  --output 合并结果.xlsx \
+  --sheet-map 来源Sheet=目标Sheet
+
+# 拆分：--sheet 可重复
+python -m excel_combiner split \
+  --source 大表.xlsx \
+  --output-dir 拆分输出 \
+  --sheet 人员=部门
+```
+
+退出码约定：`0` 成功，`2` 为命令参数格式错误，`3` 为输入、配置或待确认业务决策错误，`4` 为处理阶段失败。拆分 CLI 要求输出目录尚不存在，所有结果先在临时目录完成，再整体落盘，避免失败时留下部分结果。
+
 ---
 
 ## 🖥️ 典型工作流
@@ -202,20 +227,22 @@
 
 这里区分“当前可重复的自动化证据”和“历史人工记录”。绿色 CI 只代表列出的自动化检查通过，不代表所有 Excel 功能都已验证。
 
-### 1.66 自动化证据
+### 1.7 自动化证据
 
 | 检查 | 验证内容 | 当前结果 |
 |------|---------|------|
-| **35 项文件级回归测试** | 测试创建临时 Excel/CSV，调用生产处理函数，重新打开输出并核对数据 | ✅ CI 通过 |
+| **35 项文件级回归测试** | 测试创建临时 Excel/CSV，调用 GUI 所用核心函数，重新打开输出并核对数据 | ✅ 保留并通过 |
+| **13 项 CLI/结构测试** | 独立进程执行成功与失败路径，检查退出码、原子输出及核心不导入 tkinter/不保存可变任务全局 | ✅ 已覆盖 |
 | **四类数据错误** | 多 Sheet 错列、旧行残留、拆分名称冲突、同名列忽略失效 | ✅ 有回归覆盖 |
 | **附加边界** | CSV BOM/空行/前导零、文件名冲突、公式转值与移动、有限的样式/合并单元格场景 | ✅ 有回归覆盖 |
-| **环境矩阵** | Ubuntu 22.04 / Windows 2022 × Python 3.8 / 3.13 | ✅ 四种组合通过 |
+| **环境矩阵** | Ubuntu 22.04 / Windows 2022 × Python 3.8 / 3.13 | ✅ CI 门禁 |
+| **Windows EXE** | PyInstaller 构建两个入口并执行 `--version` | ✅ CI 门禁 |
 
-测试中的弹窗选择由 mock 模拟；测试调用真实读入、处理和写出函数，但没有从 GUI 或打包后的 exe 完成整条用户操作链。因此这里称为“文件级回归测试”，不称为完整 E2E。
+文件级测试中的弹窗选择由 mock 模拟；CLI 测试是真实独立进程。EXE 冒烟只证明打包产物能够启动并报告版本，没有自动点击完整 GUI，因此不称为完整 GUI E2E。
 
 ### 历史人工记录
 
-仓库中的 `测试文档/测试方案.md` 记录了早期 19 项结构化用例，README 旧版本还记录过 5 轮人工检查。这些记录可用于了解开发历史，但没有在 1.66 中自动重跑，也不能替代当前 CI。完整 GUI、打包 exe、VBA 运行、复杂图表/绘图对象、性能和大规模文件兼容性仍待专项验证。
+仓库中的 `测试文档/测试方案.md` 记录了早期 19 项结构化用例，README 旧版本还记录过 5 轮人工检查。这些记录可用于了解开发历史，但没有在 1.7 中自动重跑，也不能替代当前 CI。完整 GUI 点击链路、Microsoft Excel 自动化、VBA 运行、复杂图表/绘图对象、性能和大规模文件兼容性仍待专项验证。
 
 ---
 
@@ -239,12 +266,17 @@
 Excel_combiner/
 ├── 合并脚本.py                          # 正向合并工具（需要 openpyxl）
 ├── 拆分脚本.py                          # 大表拆分工具（需要 openpyxl）
+├── excel_combiner/                      # 无界面核心、任务模型与 CLI
+│   ├── merge_core.py / split_core.py    # GUI 与 CLI 共用的业务处理
+│   └── cli.py / __main__.py             # python -m excel_combiner
 ├── PRD_Excel小表并大表工具.md            # 产品需求文档
 ├── AI_CONTEXT.md                       # AI 项目记忆（坑位记录 + 反向填表设计）
 ├── DEVELOPMENT_RULES.md                # 版本同步、发布流程与敏感材料规则
 ├── requirements.txt                    # 合并工具和测试的依赖
 ├── CHANGELOG.md                        # 版本修复记录与标签使用说明
 ├── tests/test_regressions.py            # 文件级自动化回归测试
+├── tests/test_cli.py                    # CLI 独立进程与核心结构测试
+├── docs/prd/v1.7.md                     # v1.7 范围与验收标准
 ├── .github/workflows/tests.yml          # Windows/Linux 自动运行测试
 ├── 测试文档/
 │   └── 测试方案.md                      # 19 项结构化测试用例
@@ -270,6 +302,7 @@ Excel_combiner/
 python -m pip install -r requirements.txt
 python 合并脚本.py
 python 拆分脚本.py
+python -m excel_combiner --help
 ```
 
 > 两个工具都需要 openpyxl；拆分端用它生成有效工作簿并保护移动后的公式引用。
@@ -283,7 +316,7 @@ python -m unittest discover -s tests -v
 
 测试会在临时目录创建 Excel/CSV 样例，调用实际处理函数，再打开输出核对值。弹窗选择由测试模拟，不需要弹出窗口或启动 Excel。覆盖多 Sheet 映射、覆盖清空、拆分分组与文件名冲突、同名列选择，以及 CSV BOM、空行和前导零。
 
-每次推送分支或提交 PR 时，GitHub Actions 自动运行 Windows/Linux × Python 3.8/3.13 四种组合。当前 `main` 尚未启用分支保护，因此 CI 会报告结果，但还没有强制阻止未通过检查的代码进入主分支。完整 GUI 操作、打包 exe、VBA 与复杂图表仍需单独验收。
+每次推送分支或提交 PR 时，GitHub Actions 自动运行 Windows/Linux × Python 3.8/3.13 四种组合，并在 Windows 构建两个 EXE 后执行最小启动冒烟。当前 `main` 尚未启用分支保护，因此 CI 会报告结果，但还没有强制阻止未通过检查的代码进入主分支。完整 GUI 操作、VBA 与复杂图表仍需单独验收。
 
 ### 打包为 exe
 
@@ -294,7 +327,7 @@ pyinstaller --onefile --console 拆分脚本.py
 ```
 
 > 使用 `--console` 保留控制台窗口，方便查看进度和日志。
-> 打包两个工具时都必须包含 openpyxl。上述命令是本地打包方法；当前 CI 没有构建或测试 exe，仓库也没有把 exe 作为 1.66 的自动发布产物。
+> 打包两个工具时都必须包含 openpyxl。CI 会重复构建并执行 `--version` 冒烟；仓库目前不直接提交或自动发布 exe 文件。
 
 ---
 
@@ -303,8 +336,8 @@ pyinstaller --onefile --console 拆分脚本.py
 - **合并脚本**：模板文件第 1 列如勾选"标注数据来源"则必须为 `表名`
 - Excel 数据处理面向 `.xlsx` / `.xlsm`（不支持旧式 `.xls`）；`.xlsm` 使用 `keep_vba` 保存 VBA 部件，但宏运行、按钮、ActiveX、签名和外部连接尚未验证
 - openpyxl 不保证保留工作簿中的全部绘图对象；复杂图表、图片和形状应先用副本验收。[openpyxl 官方文档](https://openpyxl.readthedocs.io/en/stable/tutorial.html#loading-from-a-file)明确提示既有文件中的形状可能在打开并保存后丢失
-- 当前 `requirements.txt` 只安装 openpyxl，没有安装 Pillow；不要把图片保留视为 1.66 的已验证能力
-- 1.66 自动化重点验证数据值及有限的样式、公式、合并单元格场景，不构成完整格式保真保证
+- 当前 `requirements.txt` 只安装 openpyxl，没有安装 Pillow；不要把图片保留视为 1.7 的已验证能力
+- 1.7 自动化重点验证数据值、CLI 入口及有限的样式、公式、合并单元格场景，不构成完整格式保真保证
 - **合并输入公式**：只取文件中最后保存的计算缓存值，不复制公式。无缓存时留空并记录日志；正式合并前应先用 Excel/WPS 完成计算并保存
 - **拆分公式**：当前自动调整同一 Sheet 内标准 A1 单元格/区域引用；跨 Sheet、结构化表格引用、命名区域、动态数组和外部链接需用实际样例验证
 - CSV 以 UTF-8 读取，映射到虚拟 Sheet `Sheet1`，仅当模板含同名 Sheet 时匹配
@@ -331,15 +364,13 @@ pyinstaller --onefile --console 拆分脚本.py
 
 - 合并或移除两份重复的手写 xlsx 解析逻辑，补齐合并端后备解析器的 inlineStr 测试。
 - 建立图表、图片、形状、公式、宏和外部链接的样例矩阵，只承诺实际验证过的类型。
-- 更新历史手工测试文档，使其与 1.66 的自动化测试范围一致。
+- 更新历史手工测试文档，使其与 1.7 的自动化测试范围一致。
 - 为 `main` 启用分支保护，把数据完整性 CI 设为合并条件。
 
-### P1 — 核心层与 CLI
+### P1 — 核心层与 CLI（1.7 已完成）
 
-- 将读取、匹配、合并、拆分和写入从 tkinter 弹窗及全局状态中分离。
-- GUI 只负责收集选择和展示结果，核心层通过参数和返回值工作。
-- 新增 CLI 入口及 subprocess 黑盒测试，检查退出码、日志和最终工作簿。
-- 在 Windows CI 构建并冒烟测试 exe 后，再把 exe 作为正式发布产物。
+- GUI 与 CLI 已共享无界面核心，CLI 黑盒测试和 Windows EXE 最小冒烟已纳入 CI。
+- 后续可补任务配置文件、结构化 JSON 日志与完整 GUI 自动化；这些不属于 1.7 已验证能力。
 
 ### P2 — 候选业务功能
 
@@ -350,11 +381,10 @@ pyinstaller --onefile --console 拆分脚本.py
 
 | 项 | 说明 | 优先级 |
 |----|------|--------|
-| 单文件与界面耦合 | 两个生产脚本合计约 2681 行，核心处理仍会调用弹窗并依赖全局状态 | P1 |
-| 解析器重复 | 合并和拆分各维护一份标准库 xlsx 解析器，修复容易只进入一份 | P1 |
-| 入口测试缺失 | 目前没有 CLI；GUI、打包 exe 和完整用户流程未自动测试 | P1 |
+| 旧实现仍保留 | 两个 GUI 脚本中仍保留部分已被 v1.7 适配层替代的旧函数，后续应在行为测试保护下清理 | P1 |
+| 入口验证范围 | CLI 有黑盒测试、EXE 有启动冒烟；完整 GUI 点击流程仍未自动测试 | P1 |
 | 重复读取 | 合并总览和正式处理阶段会再次读取小表，增加耗时和状态不一致风险 | P2 |
-| 自动化范围 | 1.66 已有 35 项回归；宏、复杂格式、性能和大规模数据仍待补测 | P2 |
+| 自动化范围 | 1.7 已有 48 项自动化检查；宏、复杂格式、性能和大规模数据仍待补测 | P2 |
 | Excel 命名空间兼容不确定 | `ns0` 前缀已修复，但未验证覆盖所有 Excel 版本 | P2 |
 | 无配置文件 | 行为全硬编码，无用户自定义选项 | P3 |
 

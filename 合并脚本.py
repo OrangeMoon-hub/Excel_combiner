@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Excel 小表并大表工具 v1.66 — 将多个结构相似的 Excel 小表按列名匹配合并到大表模板中。
+Excel 小表并大表工具 v1.7 — 将多个结构相似的 Excel 小表按列名匹配合并到大表模板中。
 模板和小表优先使用 openpyxl；合并输入公式按最后计算值导入，避免列重排后引用错位。
 """
 
@@ -9,7 +9,7 @@ from xml.etree import ElementTree as ET
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 
-APP_VERSION = '1.66'
+APP_VERSION = '1.7'
 
 try:
     import openpyxl
@@ -1588,6 +1588,47 @@ def process_small_table(filepath, filename, big_snapshot, sheet_mapping=None):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  v1.7 核心适配层
+# ══════════════════════════════════════════════════════════════════
+# GUI 仍负责文件选择和弹窗；读取、匹配与写入由无界面核心执行。
+from excel_combiner import merge_core as _merge_core
+
+
+def _read_big_table(filepath):
+    return _merge_core.read_big_table(
+        filepath, add_source_column=_add_source_column, logger=log)
+
+
+def process_small_table(filepath, filename, big_snapshot, sheet_mapping=None):
+    state = _merge_core.MergeTaskState(
+        exceptions=_exceptions, cancelled_tables=_cancelled_tables)
+    decisions = _merge_core.MergeDecisions(
+        extra_sheet_map=lambda fn, sheets, targets: _extra_sheet_map_dialog(
+            fn, sheets, targets),
+        extra_columns=lambda fn, sheet, header_len, rows: _extra_cols_dialog(
+            fn, sheet, header_len, rows),
+        no_header=lambda fn, sheet, column: _no_header_dialog(fn, sheet, column),
+        discarded_columns=lambda fn, sheet, columns: _discarded_cols_dialog(
+            fn, sheet, columns),
+        duplicate_column=lambda *args: _dup_col_multi_dialog(*args),
+        warning=lambda title, message: messagebox.showwarning(title, message),
+    )
+    try:
+        return _merge_core.process_small_table(
+            filepath, filename, big_snapshot, sheet_mapping=sheet_mapping,
+            add_source_column=_add_source_column, state=state,
+            decisions=decisions, logger=log)
+    except Exception as exc:
+        log('错误: 读取或处理 %s 失败 - %s' % (filename, exc))
+        return False, None
+
+
+def write_result_with_template(template_path, output_path, row_data_dict, big_snapshot):
+    return _merge_core.write_result_with_template(
+        template_path, output_path, row_data_dict, big_snapshot)
+
+
+# ══════════════════════════════════════════════════════════════════
 #  主流程
 # ══════════════════════════════════════════════════════════════════
 
@@ -1810,6 +1851,12 @@ def main():
     _root.destroy()
 
 
+if __name__ == '__main__' and '--version' in sys.argv:
+    print('Excel Combiner 合并工具 %s' % APP_VERSION)
+    raise SystemExit(0)
+if __name__ == '__main__' and ('--help' in sys.argv or '-h' in sys.argv):
+    print('用法: 合并脚本.py\n直接运行时打开图形界面。\n--version  显示版本号')
+    raise SystemExit(0)
 if __name__ == '__main__':
     try:
         main()

@@ -12,6 +12,7 @@ from xml.etree import ElementTree as ET
 
 import openpyxl
 from openpyxl.styles import PatternFill
+from excel_combiner import __version__ as package_version
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,7 @@ class VersionMetadataTests(unittest.TestCase):
         version = merge.APP_VERSION
         self.assertRegex(version, r'^\d+\.\d+$')
         self.assertEqual(split.APP_VERSION, version)
+        self.assertEqual(package_version, version)
         self.assertTrue((ROOT / 'README.md').read_text(encoding='utf-8').startswith(
             '# Excel 小表并大表 — 智能合并 & 拆分工具 V%s' % version))
         self.assertIn('> 版本: v%s' % version,
