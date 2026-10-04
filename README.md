@@ -235,8 +235,8 @@ python -m excel_combiner split \
 | **14 项 CLI/入口/结构测试** | 独立进程执行成功与失败路径，检查退出码、原子输出、传统入口版本及核心边界 | ✅ 已覆盖 |
 | **四类数据错误** | 多 Sheet 错列、旧行残留、拆分名称冲突、同名列忽略失效 | ✅ 有回归覆盖 |
 | **附加边界** | CSV BOM/空行/前导零、文件名冲突、公式转值与移动、有限的样式/合并单元格场景 | ✅ 有回归覆盖 |
-| **环境矩阵** | Ubuntu 22.04 / Windows 2022 × Python 3.8 / 3.13 | ✅ CI 门禁 |
-| **Windows EXE** | PyInstaller 构建两个入口并执行 `--version` | ✅ CI 门禁 |
+| **环境矩阵** | Ubuntu 22.04 / Windows 2022 × Python 3.8 / 3.13 | ✅ CI 通过 |
+| **Windows EXE** | PyInstaller 构建两个入口并执行 `--version` | ✅ CI 通过 |
 
 文件级测试中的弹窗选择由 mock 模拟；CLI 测试是真实独立进程。EXE 冒烟只证明打包产物能够启动并报告版本，没有自动点击完整 GUI，因此不称为完整 GUI E2E。
 
