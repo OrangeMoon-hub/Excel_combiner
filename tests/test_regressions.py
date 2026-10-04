@@ -4,9 +4,11 @@ import importlib.util
 import io
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
+from xml.etree import ElementTree as ET
 
 import openpyxl
 from openpyxl.styles import PatternFill
@@ -24,6 +26,19 @@ def load_script(name, filename):
 
 merge = load_script('excel_merge', '合并脚本.py')
 split = load_script('excel_split', '拆分脚本.py')
+
+
+class VersionMetadataTests(unittest.TestCase):
+    def test_release_version_is_synced_across_scripts_and_release_docs(self):
+        version = merge.APP_VERSION
+        self.assertRegex(version, r'^\d+\.\d+$')
+        self.assertEqual(split.APP_VERSION, version)
+        self.assertTrue((ROOT / 'README.md').read_text(encoding='utf-8').startswith(
+            '# Excel 小表并大表 — 智能合并 & 拆分工具 V%s' % version))
+        self.assertIn('> 版本: v%s' % version,
+                      (ROOT / 'PRD_Excel小表并大表工具.md').read_text(encoding='utf-8'))
+        self.assertIn('## %s —' % version,
+                      (ROOT / 'CHANGELOG.md').read_text(encoding='utf-8'))
 
 
 class FileTestCase(unittest.TestCase):
@@ -65,6 +80,51 @@ class FileTestCase(unittest.TestCase):
         wb = openpyxl.load_workbook(filepath)
         self.addCleanup(wb.close)
         return wb
+
+    def set_formula_cache(self, filepath, coordinate, cached_value, sheet_index=1):
+        """Give an openpyxl-created formula a cached value without Excel.
+
+        openpyxl writes the formula but leaves its cached ``<v>`` empty.  The
+        merge path must consume Excel's last calculated value instead of
+        copying a position-dependent formula into a differently ordered table.
+        """
+        source = Path(filepath)
+        target_part = 'xl/worksheets/sheet%d.xml' % sheet_index
+        with zipfile.ZipFile(source, 'r') as archive:
+            members = {name: archive.read(name) for name in archive.namelist()}
+        root = ET.fromstring(members[target_part])
+        ns = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+        cell = root.find(".//s:c[@r='%s']" % coordinate, ns)
+        self.assertIsNotNone(cell)
+        self.assertIsNotNone(cell.find('s:f', ns))
+        value = cell.find('s:v', ns)
+        if value is None:
+            value = ET.SubElement(cell, '{%s}v' % ns['s'])
+        value.text = str(cached_value)
+        members[target_part] = ET.tostring(root, encoding='utf-8', xml_declaration=True)
+        rewritten = source.with_suffix('.rewritten.xlsx')
+        with zipfile.ZipFile(rewritten, 'w', zipfile.ZIP_DEFLATED) as archive:
+            for name, data in members.items():
+                archive.writestr(name, data)
+        rewritten.replace(source)
+
+    def remove_calculation_properties(self, filepath):
+        """Simulate a valid third-party workbook that omits workbook calcPr."""
+        source = Path(filepath)
+        target_part = 'xl/workbook.xml'
+        with zipfile.ZipFile(source, 'r') as archive:
+            members = {name: archive.read(name) for name in archive.namelist()}
+        root = ET.fromstring(members[target_part])
+        ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+        calc_properties = root.find('{%s}calcPr' % ns)
+        if calc_properties is not None:
+            root.remove(calc_properties)
+        members[target_part] = ET.tostring(root, encoding='utf-8', xml_declaration=True)
+        rewritten = source.with_suffix('.rewritten.xlsx')
+        with zipfile.ZipFile(rewritten, 'w', zipfile.ZIP_DEFLATED) as archive:
+            for name, data in members.items():
+                archive.writestr(name, data)
+        rewritten.replace(source)
 
     def merge_files(self, template, source, mapping):
         snapshot = merge._read_big_table(template)
@@ -177,6 +237,52 @@ class SheetMappingTests(FileTestCase):
 
 
 class TemplateWritingTests(FileTestCase):
+    def test_merge_adds_calculation_properties_when_template_omits_them(self):
+        template = self.workbook('template.xlsx', {'人员': [['姓名']]})
+        self.remove_calculation_properties(template)
+        source = self.workbook('source.xlsx', {'人员': [['姓名'], ['张三']]})
+
+        result = self.merge_files(template, source, {'人员': '人员'})
+
+        self.assertEqual(result['人员']['A2'].value, '张三')
+        self.assertEqual(result.calculation.calcMode, 'auto')
+        self.assertTrue(result.calculation.fullCalcOnLoad)
+        self.assertTrue(result.calculation.forceFullCalc)
+
+    def test_merge_uses_cached_value_instead_of_reordered_formula(self):
+        template = self.workbook('template.xlsx', {
+            '人员': [['数量', '价格', '差额']],
+        })
+        source = self.workbook('source.xlsx', {
+            '人员': [['价格', '数量', '差额'], [100, 3, '=A2-B2']],
+        })
+        self.set_formula_cache(source, 'C2', 97)
+
+        result = self.merge_files(template, source, {'人员': '人员'})
+
+        self.assertEqual(list(result['人员'].values)[1], ('3', '100', '97'))
+        self.assertNotEqual(result['人员']['C2'].data_type, 'f')
+
+    def test_merge_output_is_a_valid_openxml_package_after_formula_conversion(self):
+        template = self.workbook('template.xlsx', {'人员': [['名称', '计算结果']]})
+        source = self.workbook('source.xlsx', {
+            '人员': [['计算结果', '名称'], ['=1+1', '测试']],
+        })
+        self.set_formula_cache(source, 'A2', 2)
+        snapshot = merge._read_big_table(template)
+        ok, rows = merge.process_small_table(source, Path(source).name, snapshot,
+                                             {'人员': '人员'})
+        self.assertTrue(ok)
+        output = str(self.folder / 'formula-output.xlsx')
+        merge.write_result_with_template(template, output, rows, snapshot)
+
+        with zipfile.ZipFile(output) as archive:
+            self.assertIsNone(archive.testzip())
+        wb = openpyxl.load_workbook(output, data_only=False)
+        self.addCleanup(wb.close)
+        self.assertEqual(wb['人员']['B2'].value, '2')
+        self.assertNotEqual(wb['人员']['B2'].data_type, 'f')
+
     def test_shorter_update_clears_old_tail_without_changing_source_or_styles(self):
         template = self.workbook('template.xlsx', {
             '人员': [['姓名', '状态'], ['张三', '旧'], ['李四', '旧'], ['王五', '旧']],
@@ -274,6 +380,41 @@ class DuplicateColumnTests(FileTestCase):
 
 
 class SplitGroupingTests(FileTestCase):
+    def test_formula_moves_with_filtered_row_and_removed_split_column(self):
+        source = self.workbook('source.xlsx', {
+            '人员': [
+                ['部门', '数量', '价格', '差额'],
+                ['甲', 2, 10, '=C2-B2'],
+                ['乙', 3, 20, '=C3-B3'],
+            ],
+        })
+
+        results = split.split_tables(source, {'人员': '部门'})
+        output = self.folder / '乙.xlsx'
+        split.write_xlsx(str(output), results['乙'])
+        wb = self.read_workbook(output)
+
+        self.assertEqual(list(wb['人员'].values)[0], ('数量', '价格', '差额'))
+        self.assertEqual(wb['人员']['C2'].value, '=B2-A2')
+        self.assertEqual(wb['人员']['C2'].data_type, 'f')
+
+    def test_formula_references_shift_on_both_sides_of_removed_column(self):
+        source = self.workbook('source.xlsx', {
+            '人员': [
+                ['左侧公式', '部门', '数量', '价格', '右侧公式', '拆分列引用'],
+                ['=D2-C2', '甲', 2, 10, '=SUM(C2:D2)+$C$1', '=B2'],
+                ['=D3-C3', '乙', 3, 20, '=SUM(C3:D3)+$C$1', '=B3'],
+            ],
+        })
+
+        results = split.split_tables(source, {'人员': '部门'})
+        output = self.folder / '乙-公式边界.xlsx'
+        split.write_xlsx(str(output), results['乙'])
+        wb = self.read_workbook(output)
+
+        self.assertEqual(wb['人员']['A2'].value, '=C2-B2')
+        self.assertEqual(wb['人员']['D2'].value, '=SUM(B2:C2)+$B$1')
+        self.assertEqual(wb['人员']['E2'].value, '=#REF!')
     def assert_independent_groups(self, values, rename=False):
         source = self.workbook('source.xlsx', {
             '人员': [['部门', '姓名']] + [[v, '人' + str(i)] for i, v in enumerate(values)],

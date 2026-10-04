@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Excel 小表并大表工具 — 将多个结构相似的 Excel 小表按列名匹配合并到大表模板中。
-模板读写使用 openpyxl（完整保留 Sheet/图表/公式/合并单元格/格式），小表解析使用标准库。
+Excel 小表并大表工具 v1.66 — 将多个结构相似的 Excel 小表按列名匹配合并到大表模板中。
+模板和小表优先使用 openpyxl；合并输入公式按最后计算值导入，避免列重排后引用错位。
 """
 
 import os, sys, zipfile, io, time, traceback
@@ -9,10 +9,14 @@ from xml.etree import ElementTree as ET
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 
+APP_VERSION = '1.66'
+
 try:
     import openpyxl
+    from openpyxl.workbook.properties import CalcProperties
 except ImportError:
     openpyxl = None
+    CalcProperties = None
 
 # ── xlsx 命名空间 ──────────────────────────────────────────────
 NS_S = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
@@ -100,16 +104,29 @@ def read_table(filepath):
 
 def read_xlsx_openpyxl(filepath):
     """用 openpyxl 读取 xlsx，返回 {sheet_name: [header_row, data_row1, ...]}。
-    所有值统一转为字符串（None→''），与标准库 read_xlsx 输出类型一致，
-    以保证列名匹配时模板与小表类型一致。"""
-    wb = openpyxl.load_workbook(filepath, data_only=False, read_only=True)
+
+    合并会按列名重排数据，因此不能把依赖原位置的公式原样复制到目标列。
+    公式单元格读取 Excel 保存的最后计算值；没有缓存值的公式留空并记录日志。
+    普通单元格仍读取原值。所有值统一转为字符串（None→''），与标准库
+    ``read_xlsx`` 的输出类型保持一致。
+    """
+    formula_wb = openpyxl.load_workbook(filepath, data_only=False, read_only=True)
+    value_wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
     result = {}
-    for ws in wb.worksheets:
+    converted_formulas = 0
+    missing_formula_cache = 0
+    for ws in formula_wb.worksheets:
+        value_ws = value_wb[ws.title]
         sheet_data = []
-        for row in ws.iter_rows(values_only=True):
-            # 转字符串，None/空 → ''
+        for row_number, row in enumerate(ws.iter_rows(values_only=True), 1):
             row_values = []
-            for v in row:
+            for column_number, v in enumerate(row, 1):
+                formula_cell = ws.cell(row=row_number, column=column_number)
+                if formula_cell.data_type == 'f':
+                    converted_formulas += 1
+                    v = value_ws.cell(row=row_number, column=column_number).value
+                    if v is None:
+                        missing_formula_cache += 1
                 if v is None:
                     row_values.append('')
                 else:
@@ -118,7 +135,14 @@ def read_xlsx_openpyxl(filepath):
             if any(v != '' for v in row_values):
                 sheet_data.append(row_values)
         result[ws.title] = sheet_data
-    wb.close()
+    formula_wb.close()
+    value_wb.close()
+    if converted_formulas:
+        log('  %s: %d 个公式按缓存计算值合并，不复制公式' %
+            (os.path.basename(filepath), converted_formulas))
+    if missing_formula_cache:
+        log('  警告: %s 有 %d 个公式没有缓存计算值，合并时留空；请先用 Excel/WPS 计算并保存' %
+            (os.path.basename(filepath), missing_formula_cache))
     return result
 
 
@@ -1339,6 +1363,16 @@ def write_result_with_template(template_path, output_path, row_data_dict, big_sn
             for row_values in rows:
                 ws.append(row_values)
         written.append(sheet_name)
+    # 模板中未被覆盖的公式仍由 Excel/WPS 重新计算；输入小表公式已经在读取时
+    # 转成缓存值，不会以错位公式写入。显式计算属性也避免旧缓存链干扰打开。
+    # Some valid third-party workbooks omit the optional workbook ``calcPr``
+    # element, which openpyxl represents as ``None``.  Create it before setting
+    # recalculation flags so such templates can still be saved normally.
+    if wb.calculation is None:
+        wb.calculation = CalcProperties()
+    wb.calculation.calcMode = 'auto'
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
     wb.save(output_path)
     return written, wb.sheetnames
 
@@ -1562,6 +1596,7 @@ def main():
 
     # ── 初始化 tkinter ──
     _root = tk.Tk()
+    _root.title('Excel 小表并大表 V%s' % APP_VERSION)
     _root.withdraw()
     try:
         sw = _root.winfo_screenwidth()
@@ -1576,6 +1611,7 @@ def main():
         _work_dir = os.path.dirname(sys.executable)
     else:
         _work_dir = os.getcwd()
+    log('程序版本: %s' % APP_VERSION)
     log('工作目录: %s' % _work_dir)
 
     # ── 扫描所有可用文件 ──
