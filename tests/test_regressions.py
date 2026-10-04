@@ -28,6 +28,19 @@ merge = load_script('excel_merge', '合并脚本.py')
 split = load_script('excel_split', '拆分脚本.py')
 
 
+class VersionMetadataTests(unittest.TestCase):
+    def test_release_version_is_synced_across_scripts_and_release_docs(self):
+        version = merge.APP_VERSION
+        self.assertRegex(version, r'^\d+\.\d+$')
+        self.assertEqual(split.APP_VERSION, version)
+        self.assertTrue((ROOT / 'README.md').read_text(encoding='utf-8').startswith(
+            '# Excel 小表并大表 — 智能合并 & 拆分工具 V%s' % version))
+        self.assertIn('> 版本: v%s' % version,
+                      (ROOT / 'PRD_Excel小表并大表工具.md').read_text(encoding='utf-8'))
+        self.assertIn('## %s —' % version,
+                      (ROOT / 'CHANGELOG.md').read_text(encoding='utf-8'))
+
+
 class FileTestCase(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()

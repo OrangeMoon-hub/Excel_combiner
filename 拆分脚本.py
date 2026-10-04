@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-大表拆分工具 v1.3 — 按指定列值将大表拆分为多个小表。
+大表拆分工具 v1.66 — 按指定列值将大表拆分为多个小表。
 每个 Sheet 独立选择拆分依据列，输出文件名=列值，Sheet名=原始Sheet名。
 使用 openpyxl 生成有效工作簿并调整拆分后的公式引用。独立运行，不依赖合并脚本。
 """
@@ -10,6 +10,8 @@ from dataclasses import dataclass, replace
 import tkinter as tk
 from tkinter import messagebox
 from collections import OrderedDict
+
+APP_VERSION = '1.66'
 
 try:
     import openpyxl
@@ -702,6 +704,7 @@ def main():
     global _root
 
     _root = tk.Tk()
+    _root.title('Excel 大表拆分 V%s' % APP_VERSION)
     _root.withdraw()
     try:
         sw = _root.winfo_screenwidth()
@@ -715,6 +718,7 @@ def main():
         work_dir = os.path.dirname(sys.executable)
     else:
         work_dir = os.getcwd()
+    log(f'程序版本: {APP_VERSION}')
     log(f'工作目录: {work_dir}')
 
     all_files = _scan_work_dir(work_dir)

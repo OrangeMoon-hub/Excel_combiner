@@ -21,3 +21,10 @@ Thumbs.db
 # 运行时日志（服务器无 GUI 环境运行时的报错）
 错误日志.txt
 *.log
+
+# 本地敏感测试材料：只能保存在仓库外；以下目录即使误建也不提交
+.private/
+private_test_data/
+local_validation/
+tests/private/
+验证证据/

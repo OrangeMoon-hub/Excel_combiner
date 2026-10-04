@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Excel 小表并大表工具 — 将多个结构相似的 Excel 小表按列名匹配合并到大表模板中。
+Excel 小表并大表工具 v1.66 — 将多个结构相似的 Excel 小表按列名匹配合并到大表模板中。
 模板和小表优先使用 openpyxl；合并输入公式按最后计算值导入，避免列重排后引用错位。
 """
 
@@ -8,6 +8,8 @@ import os, sys, zipfile, io, time, traceback
 from xml.etree import ElementTree as ET
 import tkinter as tk
 from tkinter import messagebox, simpledialog
+
+APP_VERSION = '1.66'
 
 try:
     import openpyxl
@@ -1594,6 +1596,7 @@ def main():
 
     # ── 初始化 tkinter ──
     _root = tk.Tk()
+    _root.title('Excel 小表并大表 V%s' % APP_VERSION)
     _root.withdraw()
     try:
         sw = _root.winfo_screenwidth()
@@ -1608,6 +1611,7 @@ def main():
         _work_dir = os.path.dirname(sys.executable)
     else:
         _work_dir = os.getcwd()
+    log('程序版本: %s' % APP_VERSION)
     log('工作目录: %s' % _work_dir)
 
     # ── 扫描所有可用文件 ──
