@@ -846,7 +846,7 @@ def main():
 
 
 if __name__ == '__main__' and '--version' in sys.argv:
-    print('Excel Combiner 拆分工具 %s' % APP_VERSION)
+    print('Excel Combiner Split %s' % APP_VERSION)
     raise SystemExit(0)
 if __name__ == '__main__' and ('--help' in sys.argv or '-h' in sys.argv):
     print('用法: 拆分脚本.py\n直接运行时打开图形界面。\n--version  显示版本号')

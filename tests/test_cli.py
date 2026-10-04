@@ -51,6 +51,19 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.strip(), 'Excel Combiner 1.7')
 
+    def test_gui_entry_versions_are_ascii_and_do_not_start_gui(self):
+        environment = os.environ.copy()
+        environment['PYTHONUTF8'] = '1'
+        for script, expected in (
+                ('合并脚本.py', 'Excel Combiner Merge 1.7'),
+                ('拆分脚本.py', 'Excel Combiner Split 1.7')):
+            completed = subprocess.run(
+                [sys.executable, str(ROOT / script), '--version'],
+                cwd=str(ROOT), env=environment, text=True, encoding='utf-8',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout.strip(), expected)
+
     def test_merge_command_writes_name_aligned_output(self):
         template = self.workbook('template.xlsx', {'人员': [['姓名', '金额']]})
         source = self.workbook('source.xlsx', {'人员': [['金额', '姓名'], [100, '张三']]})
