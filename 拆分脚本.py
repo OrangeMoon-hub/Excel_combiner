@@ -2,58 +2,32 @@
 """
 大表拆分工具 v1.3 — 按指定列值将大表拆分为多个小表。
 每个 Sheet 独立选择拆分依据列，输出文件名=列值，Sheet名=原始Sheet名。
-零第三方依赖，仅使用 Python 标准库。独立运行，不依赖合并脚本。
+使用 openpyxl 生成有效工作簿并调整拆分后的公式引用。独立运行，不依赖合并脚本。
 """
 
-import os, sys, zipfile, io, time, traceback
-from xml.etree import ElementTree as ET
+import os, sys, time, traceback, re
+from dataclasses import dataclass, replace
 import tkinter as tk
 from tkinter import messagebox
 from collections import OrderedDict
 
-# ── xlsx 命名空间 ──────────────────────────────────────────────
-NS_S = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
-NS_R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
-ET.register_namespace('', NS_S)
-ET.register_namespace('r', NS_R)
+try:
+    import openpyxl
+    from openpyxl.formula import Tokenizer
+    from openpyxl.utils import column_index_from_string, get_column_letter
+except ImportError:
+    openpyxl = None
+    Tokenizer = None
 
+@dataclass(frozen=True)
+class FormulaCell:
+    """Formula plus enough source context to relocate it during splitting."""
 
-# ══════════════════════════════════════════════════════════════════
-#  xlsx 工具函数
-# ══════════════════════════════════════════════════════════════════
-
-def _tostring_xml(element):
-    raw = ET.tostring(element, encoding='unicode')
-    if raw.startswith("<?xml version='1.0' encoding='utf-8'?>"):
-        raw = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + raw[len("<?xml version='1.0' encoding='utf-8'?>"):]
-    elif raw.startswith("<?xml version='1.0' encoding='UTF-8'?>"):
-        raw = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + raw[len("<?xml version='1.0' encoding='UTF-8'?>"):]
-    return raw.encode('UTF-8')
-
-
-def _parse_cell_ref(ref):
-    """解析单元格引用 'A1' → (col_index, row_num)"""
-    import re
-    m = re.match(r'^([A-Z]+)(\d+)$', ref)
-    if not m:
-        return 0, 0
-    col_str = m.group(1)
-    row_num = int(m.group(2))
-    col = 0
-    for ch in col_str:
-        col = col * 26 + (ord(ch) - ord('A') + 1)
-    return col - 1, row_num
-
-
-def _col_letter(col):
-    """0-based column index → Excel column letter"""
-    result = ''
-    col += 1
-    while col > 0:
-        col -= 1
-        result = chr(65 + col % 26) + result
-        col //= 26
-    return result
+    formula: str
+    origin: str
+    sheet_name: str
+    cached_value: object = None
+    removed_column: int = None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -71,64 +45,35 @@ def read_csv(filepath):
 
 
 def read_xlsx(filepath):
-    """读取 xlsx 文件 → {sheet_name: [header_row, data_row1, ...]}"""
-    z = zipfile.ZipFile(filepath, 'r')
-    shared_strings = []
-    if 'xl/sharedStrings.xml' in z.namelist():
-        root = ET.parse(z.open('xl/sharedStrings.xml')).getroot()
-        for si in root.findall('.//{%s}si' % NS_S):
-            texts = []
-            for t in si.iter('{%s}t' % NS_S):
-                if t.text:
-                    texts.append(t.text)
-            shared_strings.append(''.join(texts))
-    wb_root = ET.parse(z.open('xl/workbook.xml')).getroot()
-    sheet_elems = wb_root.findall('.//{%s}sheet' % NS_S)
-    sheet_names = [s.get('name', '') for s in sheet_elems]
+    """读取工作簿，同时保留公式、原坐标和最后计算缓存值。"""
+    if openpyxl is None:
+        raise RuntimeError('拆分含公式的工作簿需要 openpyxl。请先安装：pip install openpyxl')
+
+    formula_wb = openpyxl.load_workbook(filepath, data_only=False, read_only=True)
+    value_wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
     result = {}
-    for idx, name in enumerate(sheet_names):
-        sheet_file = 'xl/worksheets/sheet%d.xml' % (idx + 1)
-        if sheet_file not in z.namelist():
-            continue
-        ws_root = ET.parse(z.open(sheet_file)).getroot()
-        rows = ws_root.findall('.//{%s}row' % NS_S)
+    for ws in formula_wb.worksheets:
+        value_ws = value_wb[ws.title]
         sheet_data = []
-        for row_el in rows:
-            cell_positions = {}
-            for c in row_el.findall('{%s}c' % NS_S):
-                cell_type = c.get('t', '')
-                ref = c.get('r', '')
-                v_el = c.find('{%s}v' % NS_S)
-                val = v_el.text if v_el is not None else ''
-                if cell_type == 's':
-                    # 共享字符串索引
-                    if val and val.isdigit():
-                        idx_s = int(val)
-                        if idx_s < len(shared_strings):
-                            val = shared_strings[idx_s]
-                elif cell_type == 'inlineStr':
-                    # 内联字符串：<is><t>文本</t></is>（无 <v>）
-                    is_el = c.find('{%s}is' % NS_S)
-                    if is_el is not None:
-                        val = ''.join(
-                            (t.text or '') for t in is_el.iter('{%s}t' % NS_S)
-                        )
-                elif cell_type == 'str':
-                    # 公式计算结果为字符串：<v> 里直接就是文本
-                    pass
-                elif cell_type == 'b':
-                    # 布尔：1=TRUE 0=FALSE
-                    val = 'TRUE' if val == '1' else ('FALSE' if val == '0' else val)
-                ci, _ = _parse_cell_ref(ref)
-                cell_positions[ci] = val
-            if not cell_positions:
-                continue
-            max_col = max(cell_positions.keys())
-            row_values = [cell_positions.get(ci, '') for ci in range(max_col + 1)]
-            if any(v for v in row_values):
+        for row_number, cells in enumerate(ws.iter_rows(), 1):
+            row_values = []
+            for column_number, cell in enumerate(cells, 1):
+                value = cell.value
+                if cell.data_type == 'f':
+                    value = FormulaCell(
+                        formula=value if str(value).startswith('=') else '=' + str(value),
+                        origin=cell.coordinate,
+                        sheet_name=ws.title,
+                        cached_value=value_ws.cell(row=row_number, column=column_number).value,
+                    )
+                elif value is None:
+                    value = ''
+                row_values.append(value)
+            if any(v != '' and v is not None for v in row_values):
                 sheet_data.append(row_values)
-        result[name] = sheet_data
-    z.close()
+        result[ws.title] = sheet_data
+    formula_wb.close()
+    value_wb.close()
     return result
 
 
@@ -142,106 +87,118 @@ def read_table(filepath):
 #  xlsx 写入
 # ══════════════════════════════════════════════════════════════════
 
+_A1_CELL_RE = re.compile(r'^(\$?)([A-Za-z]{1,3})(\$?)([1-9][0-9]*)$')
+
+
+def _unquote_sheet_name(value):
+    if value.startswith("'") and value.endswith("'"):
+        return value[1:-1].replace("''", "'")
+    return value
+
+
+def _translate_formula_reference(reference, formula_cell, destination):
+    """Translate a local A1 reference after filtering rows and deleting a column.
+
+    Named ranges, structured references and references to another sheet are left
+    unchanged. Relative row references follow the formula to its new output row;
+    absolute rows remain fixed. Deleting the split column shifts references on
+    its right and turns a direct reference to that column into ``#REF!``.
+    """
+    prefix = ''
+    coordinate = reference
+    if '!' in reference:
+        sheet_part, coordinate = reference.rsplit('!', 1)
+        if _unquote_sheet_name(sheet_part).casefold() != formula_cell.sheet_name.casefold():
+            return reference
+        prefix = sheet_part + '!'
+
+    endpoints = coordinate.split(':')
+    if len(endpoints) > 2:
+        return reference
+    parsed = [_A1_CELL_RE.match(endpoint) for endpoint in endpoints]
+    if not all(parsed):
+        return reference
+
+    origin_match = _A1_CELL_RE.match(formula_cell.origin)
+    destination_match = _A1_CELL_RE.match(destination)
+    if origin_match is None or destination_match is None:
+        return reference
+    row_delta = int(destination_match.group(4)) - int(origin_match.group(4))
+
+    translated = []
+    for match in parsed:
+        column_absolute, column_letters, row_absolute, row_text = match.groups()
+        column_number = column_index_from_string(column_letters)
+        if formula_cell.removed_column:
+            if column_number == formula_cell.removed_column:
+                return '#REF!'
+            if column_number > formula_cell.removed_column:
+                column_number -= 1
+        row_number = int(row_text)
+        if not row_absolute:
+            row_number += row_delta
+            if row_number < 1:
+                return '#REF!'
+        translated.append('%s%s%s%d' % (
+            column_absolute,
+            get_column_letter(column_number),
+            row_absolute,
+            row_number,
+        ))
+    return prefix + ':'.join(translated)
+
+
+def _translate_split_formula(formula_cell, destination):
+    try:
+        tokenizer = Tokenizer(formula_cell.formula)
+        pieces = []
+        for token in tokenizer.items:
+            value = token.value
+            if token.type == 'OPERAND' and token.subtype == 'RANGE':
+                value = _translate_formula_reference(value, formula_cell, destination)
+            pieces.append(value)
+        return '=' + ''.join(pieces)
+    except Exception as exc:
+        log('  警告: 公式 %s 无法安全调整，将使用缓存值: %s' %
+            (formula_cell.origin, exc))
+        return None
+
+
 def write_xlsx(filepath, sheets_data):
-    shared_strings = []
-    ss_map = {}
+    """用 openpyxl 生成拆分结果，并按新行列位置调整公式引用。"""
+    if openpyxl is None:
+        raise RuntimeError('拆分含公式的工作簿需要 openpyxl。请先安装：pip install openpyxl')
 
-    def _ss_idx(text):
-        s = str(text) if text is not None else ''
-        if s not in ss_map:
-            ss_map[s] = len(shared_strings)
-            shared_strings.append(s)
-        return ss_map[s]
-
-    for _, rows in sheets_data.items():
-        for row in rows:
-            for cell in row:
-                if isinstance(cell, str):
-                    _ss_idx(cell)
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        # [Content_Types].xml
-        ct_parts = [
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
-            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
-            '<Default Extension="xml" ContentType="application/xml"/>',
-            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
-            '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>',
-        ]
-        for i in range(len(sheets_data)):
-            ct_parts.append('<Override PartName="/xl/worksheets/sheet%d.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' % (i + 1))
-        ct_parts.append('</Types>')
-        zf.writestr('[Content_Types].xml', '\n'.join(ct_parts))
-
-        # _rels/.rels
-        zf.writestr('_rels/.rels',
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>\n'
-            '</Relationships>')
-
-        # xl/_rels/workbook.xml.rels
-        wb_rels_parts = [
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>',
-        ]
-        for i in range(len(sheets_data)):
-            wb_rels_parts.append('<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet%d.xml"/>' % (i + 2, i + 1))
-        wb_rels_parts.append('</Relationships>')
-        zf.writestr('xl/_rels/workbook.xml.rels', '\n'.join(wb_rels_parts))
-
-        # xl/workbook.xml
-        wb = ET.Element('{%s}workbook' % NS_S)
-        sheets_el = ET.SubElement(wb, '{%s}sheets' % NS_S)
-        for i, name in enumerate(list(sheets_data.keys())):
-            ET.SubElement(sheets_el, '{%s}sheet' % NS_S,
-                          name=name, sheetId=str(i + 1),
-                          **{'{%s}id' % NS_R: 'rId%d' % (i + 2)})
-        zf.writestr('xl/workbook.xml', _tostring_xml(wb))
-
-        # xl/sharedStrings.xml
-        sst = ET.Element('{%s}sst' % NS_S, count=str(len(shared_strings)), uniqueCount=str(len(shared_strings)))
-        for s in shared_strings:
-            si = ET.SubElement(sst, '{%s}si' % NS_S)
-            t = ET.SubElement(si, '{%s}t' % NS_S)
-            t.text = s
-        zf.writestr('xl/sharedStrings.xml', _tostring_xml(sst))
-
-        # xl/worksheets/sheetN.xml
-        for idx, (sn, rows) in enumerate(sheets_data.items()):
-            ws = ET.Element('{%s}worksheet' % NS_S)
-            last_col = max(len(r) for r in rows) - 1 if rows else 0
-            last_row = len(rows)
-            ET.SubElement(ws, '{%s}dimension' % NS_S, ref='A1:%s%d' % (_col_letter(last_col), last_row))
-            sv = ET.SubElement(ws, '{%s}sheetViews' % NS_S)
-            ET.SubElement(sv, '{%s}sheetView' % NS_S, workbookViewId='0')
-            ET.SubElement(ws, '{%s}sheetFormatPr' % NS_S, defaultRowHeight='15')
-            sd = ET.SubElement(ws, '{%s}sheetData' % NS_S)
-            for row_idx, row in enumerate(rows, 1):
-                r_el = ET.SubElement(sd, '{%s}row' % NS_S, r=str(row_idx))
-                for col_idx, val in enumerate(row):
-                    ref = '%s%d' % (_col_letter(col_idx), row_idx)
-                    c = ET.SubElement(r_el, '{%s}c' % NS_S, r=ref)
-                    if val is None:
-                        val = ''
-                    if isinstance(val, (int, float)):
-                        v = ET.SubElement(c, '{%s}v' % NS_S)
-                        v.text = str(val)
-                    elif isinstance(val, bool):
-                        c.set('t', 'b')
-                        v = ET.SubElement(c, '{%s}v' % NS_S)
-                        v.text = '1' if val else '0'
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    translated_count = 0
+    cached_count = 0
+    for sheet_name, rows in sheets_data.items():
+        ws = wb.create_sheet(title=sheet_name)
+        for row_index, row in enumerate(rows, 1):
+            for column_index, value in enumerate(row, 1):
+                cell = ws.cell(row=row_index, column=column_index)
+                if isinstance(value, FormulaCell):
+                    formula = _translate_split_formula(value, cell.coordinate)
+                    if formula is not None:
+                        cell.value = formula
+                        translated_count += 1
+                    elif value.cached_value is not None:
+                        cell.value = value.cached_value
+                        cached_count += 1
                     else:
-                        c.set('t', 's')
-                        v = ET.SubElement(c, '{%s}v' % NS_S)
-                        v.text = str(ss_map[str(val)])
-            zf.writestr('xl/worksheets/sheet%d.xml' % (idx + 1), _tostring_xml(ws))
-
-    with open(filepath, 'wb') as f:
-        f.write(buf.getvalue())
+                        cell.value = ''
+                else:
+                    cell.value = '' if value is None else value
+    wb.calculation.calcMode = 'auto'
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
+    wb.save(filepath)
+    wb.close()
+    if translated_count:
+        log('  已保护并调整 %d 个公式引用' % translated_count)
+    if cached_count:
+        log('  %d 个无法调整的公式已改用缓存计算值' % cached_count)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -595,6 +552,17 @@ def _configure_split_dialog(filepath):
 #  核心拆分逻辑
 # ══════════════════════════════════════════════════════════════════
 
+def _plain_cell_value(value):
+    if isinstance(value, FormulaCell):
+        return value.cached_value if value.cached_value is not None else ''
+    return value
+
+
+def _split_output_value(value, removed_column):
+    if isinstance(value, FormulaCell):
+        return replace(value, removed_column=removed_column)
+    return str(value) if value is not None else ''
+
 def split_tables(filepath, sheet_configs, rename_sheet=False):
     """按 sheet_configs 拆分大表。
 
@@ -633,7 +601,8 @@ def split_tables(filepath, sheet_configs, rename_sheet=False):
             log(f'  Sheet "{sheet_name}" 表头为空，跳过')
             continue
 
-        header = [str(h) if h is not None else '' for h in data[0]]
+        header = [str(_plain_cell_value(h)) if _plain_cell_value(h) is not None else ''
+                  for h in data[0]]
         try:
             split_idx = header.index(split_col)
         except ValueError:
@@ -651,7 +620,7 @@ def split_tables(filepath, sheet_configs, rename_sheet=False):
         for row in data[1:]:
             if not row or all(v == '' or v is None for v in row):
                 continue
-            val = row[split_idx] if split_idx < len(row) else ''
+            val = _plain_cell_value(row[split_idx]) if split_idx < len(row) else ''
             val = str(val).strip() if val is not None else ''
             if not val:
                 sheet_skipped += 1
@@ -661,7 +630,8 @@ def split_tables(filepath, sheet_configs, rename_sheet=False):
                     log(f'  Sheet "{sheet_name}" 拆分列值为空，跳过行: {preview}...')
                 continue
 
-            new_row = [str(row[i]) if i < len(row) and row[i] is not None else ''
+            new_row = [_split_output_value(row[i], split_idx + 1)
+                       if i < len(row) else ''
                        for i in range(len(row)) if i != split_idx]
 
             # 分组使用原始业务值，文件名清理不能改变分组身份。
@@ -707,7 +677,8 @@ def split_tables(filepath, sheet_configs, rename_sheet=False):
                 data = all_sheets.get(sn)
                 if data and data[0]:
                     split_col = sheet_configs.get(sn, '')
-                    header = [str(h) if h is not None else '' for h in data[0]]
+                    header = [str(_plain_cell_value(h)) if _plain_cell_value(h) is not None else ''
+                              for h in data[0]]
                     try:
                         si = header.index(split_col)
                     except ValueError:
