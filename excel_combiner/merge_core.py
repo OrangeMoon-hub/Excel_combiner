@@ -76,7 +76,13 @@ def read_xlsx(filepath, logger=None):
                         value = value_ws.cell(row=row_number, column=column_number).value
                         if value is None:
                             missing_cache += 1
-                    values.append('' if value is None else str(value))
+                    if value is None:
+                        value = ''
+                    elif row_number == 1:
+                        # Column matching is text based, but data rows must keep
+                        # their original Excel types (number, date, boolean, text).
+                        value = str(value)
+                    values.append(value)
                 if any(value != '' for value in values):
                     rows.append(values)
             result[worksheet.title] = rows

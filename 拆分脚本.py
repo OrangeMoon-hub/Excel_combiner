@@ -563,7 +563,7 @@ def _plain_cell_value(value):
 def _split_output_value(value, removed_column):
     if isinstance(value, FormulaCell):
         return replace(value, removed_column=removed_column)
-    return str(value) if value is not None else ''
+    return value if value is not None else ''
 
 def split_tables(filepath, sheet_configs, rename_sheet=False):
     """按 sheet_configs 拆分大表。

@@ -197,7 +197,9 @@ def _plain_cell_value(value):
 def _split_output_value(value, removed_column):
     if isinstance(value, FormulaCell):
         return replace(value, removed_column=removed_column)
-    return str(value) if value is not None else ''
+    # Keep the source workbook's cell type. Converting numeric operands to text
+    # makes formulas such as SUMPRODUCT calculate as zero after splitting.
+    return value if value is not None else ''
 
 
 def split_tables(filepath, sheet_configs, rename_sheet=False, logger=None):

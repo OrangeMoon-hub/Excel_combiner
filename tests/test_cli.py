@@ -78,7 +78,7 @@ class CliTestCase(unittest.TestCase):
         self.assertTrue(output.exists())
         workbook = openpyxl.load_workbook(output, data_only=False)
         self.addCleanup(workbook.close)
-        self.assertEqual(list(workbook['人员'].values), [('姓名', '金额'), ('张三', '100')])
+        self.assertEqual(list(workbook['人员'].values), [('姓名', '金额'), ('张三', 100)])
         self.assertIn(str(output), completed.stdout)
 
     def test_split_command_writes_one_file_per_group(self):

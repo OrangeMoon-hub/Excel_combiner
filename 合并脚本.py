@@ -107,8 +107,8 @@ def read_xlsx_openpyxl(filepath):
 
     合并会按列名重排数据，因此不能把依赖原位置的公式原样复制到目标列。
     公式单元格读取 Excel 保存的最后计算值；没有缓存值的公式留空并记录日志。
-    普通单元格仍读取原值。所有值统一转为字符串（None→''），与标准库
-    ``read_xlsx`` 的输出类型保持一致。
+    普通数据单元格保留数值、布尔、日期和文本类型；表头统一转为文本，
+    以保持列名匹配规则稳定。
     """
     formula_wb = openpyxl.load_workbook(filepath, data_only=False, read_only=True)
     value_wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
@@ -128,9 +128,10 @@ def read_xlsx_openpyxl(filepath):
                     if v is None:
                         missing_formula_cache += 1
                 if v is None:
-                    row_values.append('')
-                else:
-                    row_values.append(str(v))
+                    v = ''
+                elif row_number == 1:
+                    v = str(v)
+                row_values.append(v)
             # 过滤全空行
             if any(v != '' for v in row_values):
                 sheet_data.append(row_values)

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import zipfile
 from contextlib import redirect_stdout
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 from xml.etree import ElementTree as ET
@@ -146,7 +147,7 @@ class SheetMappingTests(FileTestCase):
         })
         result = self.merge_files(template, source, {'一组': '汇总', '二组': '汇总'})
         self.assertEqual(list(result['汇总'].values),
-                         [('姓名', '金额'), ('张三', '1000'), ('李四', '2000')])
+                         [('姓名', '金额'), ('张三', 1000), ('李四', 2000)])
 
     def test_legacy_mapping_dialog_also_preserves_each_header(self):
         template = self.workbook('template.xlsx', {'汇总': [['姓名', '金额']]})
@@ -157,7 +158,7 @@ class SheetMappingTests(FileTestCase):
         with patch.object(merge, '_extra_sheet_map_dialog', return_value={'额外': '汇总'}):
             result = self.merge_files(template, source, None)
         self.assertEqual(list(result['汇总'].values),
-                         [('姓名', '金额'), ('李四', '2000'), ('张三', '1000')])
+                         [('姓名', '金额'), ('李四', 2000), ('张三', 1000)])
 
     def test_different_column_sets_leave_missing_values_blank(self):
         template = self.workbook('template.xlsx', {'汇总': [['姓名', '金额', '备注']]})
@@ -167,7 +168,7 @@ class SheetMappingTests(FileTestCase):
         })
         result = self.merge_files(template, source, {'一组': '汇总', '二组': '汇总'})
         self.assertEqual(list(result['汇总'].values)[1:],
-                         [('张三', '1000', None), ('李四', None, '补录')])
+                         [('张三', 1000, None), ('李四', None, '补录')])
 
     def test_extra_column_is_audited_against_original_source_sheet(self):
         template = self.workbook('template.xlsx', {'汇总': [['姓名', '金额']]})
@@ -219,7 +220,7 @@ class SheetMappingTests(FileTestCase):
         })
         result = self.merge_files(template, source, {'一组': '汇总', '二组': '汇总'})
         self.assertEqual(list(result['汇总'].values)[1:],
-                         [('source', '张三', '1000'), ('source', '李四', '2000')])
+                         [('source', '张三', 1000), ('source', '李四', 2000)])
 
     def test_all_sheets_skipped_returns_no_rows(self):
         source = self.workbook('source.xlsx', {'人员': [['姓名'], ['张三']]})
@@ -239,6 +240,24 @@ class SheetMappingTests(FileTestCase):
 
 
 class TemplateWritingTests(FileTestCase):
+    def test_merge_preserves_xlsx_cell_data_types_when_columns_are_reordered(self):
+        template = self.workbook('template.xlsx', {
+            '人员': [['金额', '数量', '启用', '日期', '标识']],
+        })
+        source = self.workbook('source.xlsx', {
+            '人员': [
+                ['标识', '日期', '启用', '数量', '金额'],
+                ['00123', date(2026, 10, 5), True, 2, 100.5],
+            ],
+        })
+
+        result = self.merge_files(template, source, {'人员': '人员'})
+        row = list(result['人员'].values)[1]
+
+        self.assertEqual(row, (100.5, 2, True, datetime(2026, 10, 5), '00123'))
+        self.assertEqual([result['人员'].cell(2, column).data_type for column in range(1, 6)],
+                         ['n', 'n', 'b', 'd', 's'])
+
     def test_merge_adds_calculation_properties_when_template_omits_them(self):
         template = self.workbook('template.xlsx', {'人员': [['姓名']]})
         self.remove_calculation_properties(template)
@@ -262,7 +281,7 @@ class TemplateWritingTests(FileTestCase):
 
         result = self.merge_files(template, source, {'人员': '人员'})
 
-        self.assertEqual(list(result['人员'].values)[1], ('3', '100', '97'))
+        self.assertEqual(list(result['人员'].values)[1], (3, 100, 97))
         self.assertNotEqual(result['人员']['C2'].data_type, 'f')
 
     def test_merge_output_is_a_valid_openxml_package_after_formula_conversion(self):
@@ -282,7 +301,7 @@ class TemplateWritingTests(FileTestCase):
             self.assertIsNone(archive.testzip())
         wb = openpyxl.load_workbook(output, data_only=False)
         self.addCleanup(wb.close)
-        self.assertEqual(wb['人员']['B2'].value, '2')
+        self.assertEqual(wb['人员']['B2'].value, 2)
         self.assertNotEqual(wb['人员']['B2'].data_type, 'f')
 
     def test_shorter_update_clears_old_tail_without_changing_source_or_styles(self):
@@ -382,6 +401,25 @@ class DuplicateColumnTests(FileTestCase):
 
 
 class SplitGroupingTests(FileTestCase):
+    def test_split_preserves_xlsx_cell_data_types_used_by_formula(self):
+        source = self.workbook('source.xlsx', {
+            '人员': [
+                ['部门', '标识', '金额', '数量', '启用', '日期', '总额'],
+                ['研发', '00123', 100.5, 2, True, date(2026, 10, 5), '=C2*D2'],
+            ],
+        })
+
+        results = split.split_tables(source, {'人员': '部门'})
+        output = self.folder / '研发.xlsx'
+        split.write_xlsx(str(output), results['研发'])
+        wb = self.read_workbook(output)
+        row = list(wb['人员'].values)[1]
+
+        self.assertEqual(row,
+                         ('00123', 100.5, 2, True, datetime(2026, 10, 5), '=B2*C2'))
+        self.assertEqual([wb['人员'].cell(2, column).data_type for column in range(1, 7)],
+                         ['s', 'n', 'n', 'b', 'd', 'f'])
+
     def test_formula_moves_with_filtered_row_and_removed_split_column(self):
         source = self.workbook('source.xlsx', {
             '人员': [
