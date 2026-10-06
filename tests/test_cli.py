@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 import openpyxl
+from openpyxl.worksheet.datavalidation import DataValidation
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +82,40 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(list(workbook['人员'].values), [('姓名', '金额'), ('张三', 100)])
         self.assertIn(str(output), completed.stdout)
 
+    def test_merge_refuses_to_overwrite_existing_output(self):
+        template = self.workbook('template.xlsx', {'人员': [['姓名']]})
+        source = self.workbook('source.xlsx', {'人员': [['姓名'], ['新数据']]})
+        output = self.workbook('existing.xlsx', {'旧结果': [['不可覆盖']]})
+        original = output.read_bytes()
+
+        completed = self.run_cli(
+            'merge', '--template', template, '--input', source,
+            '--output', output, '--sheet-map', '人员=人员',
+        )
+
+        self.assertEqual(completed.returncode, 3)
+        self.assertIn('输出文件已存在', completed.stderr)
+        self.assertEqual(output.read_bytes(), original)
+
+    def test_merge_reports_formula_without_cached_value(self):
+        template = self.workbook('template.xlsx', {'人员': [['姓名', '结果']]})
+        source = self.workbook('source.xlsx', {
+            '人员': [['姓名', '结果'], ['张三', '=1+1']],
+        })
+        output = self.folder / 'merged.xlsx'
+
+        completed = self.run_cli(
+            'merge', '--template', template, '--input', source,
+            '--output', output, '--sheet-map', '人员=人员',
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn('警告', completed.stdout)
+        self.assertIn('没有缓存计算值', completed.stdout)
+        workbook = openpyxl.load_workbook(output, data_only=False)
+        self.addCleanup(workbook.close)
+        self.assertIsNone(workbook['人员']['B2'].value)
+
     def test_split_command_writes_one_file_per_group(self):
         source = self.workbook('source.xlsx', {
             '人员': [['部门', '姓名'], ['研发', '张三'], ['销售', '李四']],
@@ -98,6 +133,49 @@ class CliTestCase(unittest.TestCase):
         workbook = openpyxl.load_workbook(output_dir / '研发.xlsx', data_only=False)
         self.addCleanup(workbook.close)
         self.assertEqual(list(workbook['人员'].values), [('姓名',), ('张三',)])
+
+    def test_split_reports_rows_skipped_for_empty_group_value(self):
+        source = self.workbook('source.xlsx', {
+            '人员': [['部门', '姓名'], ['研发', '保留'], ['', '跳过']],
+        })
+        output_dir = self.folder / 'split-output'
+
+        completed = self.run_cli(
+            'split', '--source', source, '--output-dir', output_dir,
+            '--sheet', '人员=部门',
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn('Sheet「人员」', completed.stdout)
+        self.assertIn('跳过 1 个空值', completed.stdout)
+
+    def test_split_failure_never_prints_completion_message(self):
+        source = self.workbook('cross-group-rule.xlsx', {
+            '数据': [
+                ['部门', '选项', '数值'],
+                ['甲', 'A', 1],
+                ['乙', 'B', 2],
+            ],
+        })
+        workbook = openpyxl.load_workbook(source)
+        worksheet = workbook['数据']
+        validation = DataValidation(type='list', formula1='$B$2:$B$3')
+        validation.add('C2:C3')
+        worksheet.add_data_validation(validation)
+        workbook.save(source)
+        workbook.close()
+        output_dir = self.folder / 'should-not-exist'
+
+        completed = self.run_cli(
+            'split', '--source', source, '--output-dir', output_dir,
+            '--sheet', '数据=部门',
+        )
+
+        self.assertEqual(completed.returncode, 3)
+        self.assertIn('数据验证公式无法安全迁移', completed.stderr)
+        self.assertNotIn('完成', completed.stdout)
+        self.assertNotIn('已生成', completed.stdout)
+        self.assertFalse(output_dir.exists())
 
     def test_missing_input_returns_input_error_without_partial_output(self):
         template = self.workbook('template.xlsx', {'人员': [['姓名']]})

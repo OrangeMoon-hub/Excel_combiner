@@ -376,6 +376,8 @@ def run_merge(request: MergeRequest, logger=None) -> MergeRunResult:
             raise InputError('输入文件不存在: %s' % path)
     if output.exists() and output.resolve() in [template.resolve()] + [path.resolve() for path in inputs]:
         raise InputError('输出路径不能覆盖模板或输入文件: %s' % output)
+    if output.exists():
+        raise InputError('输出文件已存在，请指定一个新文件名: %s' % output)
     state = MergeTaskState()
     try:
         snapshot = read_big_table(template, request.add_source_column, logger)

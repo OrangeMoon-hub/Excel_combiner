@@ -67,7 +67,7 @@ def main(arguments=None):
                 output=args.output,
                 sheet_mapping=dict(args.sheet_map),
                 add_source_column=args.add_source_column,
-            ))
+            ), logger=print)
             print('合并完成: %s' % result.output)
             return 0
         result = run_split(SplitRequest(
@@ -75,7 +75,7 @@ def main(arguments=None):
             output_dir=args.output_dir,
             sheet_configs=dict(args.sheet),
             rename_sheet=args.rename_sheet,
-        ))
+        ), logger=print)
         print('拆分完成: %d 个文件，输出目录: %s' %
               (len(result.output_files), args.output_dir))
         return 0
