@@ -6,12 +6,21 @@ import tempfile
 import unittest
 import zipfile
 from contextlib import redirect_stdout
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
 import openpyxl
+from openpyxl.chart import BarChart, Reference
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import PatternFill
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.worksheet.table import Table, TableStyleInfo
+from excel_combiner import __version__ as package_version
+from excel_combiner.errors import InputError
+from excel_combiner.models import SplitRequest
+from excel_combiner.split_core import run_split
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +42,7 @@ class VersionMetadataTests(unittest.TestCase):
         version = merge.APP_VERSION
         self.assertRegex(version, r'^\d+\.\d+$')
         self.assertEqual(split.APP_VERSION, version)
+        self.assertEqual(package_version, version)
         self.assertTrue((ROOT / 'README.md').read_text(encoding='utf-8').startswith(
             '# Excel 小表并大表 — 智能合并 & 拆分工具 V%s' % version))
         self.assertIn('> 版本: v%s' % version,
@@ -144,7 +154,7 @@ class SheetMappingTests(FileTestCase):
         })
         result = self.merge_files(template, source, {'一组': '汇总', '二组': '汇总'})
         self.assertEqual(list(result['汇总'].values),
-                         [('姓名', '金额'), ('张三', '1000'), ('李四', '2000')])
+                         [('姓名', '金额'), ('张三', 1000), ('李四', 2000)])
 
     def test_legacy_mapping_dialog_also_preserves_each_header(self):
         template = self.workbook('template.xlsx', {'汇总': [['姓名', '金额']]})
@@ -155,7 +165,7 @@ class SheetMappingTests(FileTestCase):
         with patch.object(merge, '_extra_sheet_map_dialog', return_value={'额外': '汇总'}):
             result = self.merge_files(template, source, None)
         self.assertEqual(list(result['汇总'].values),
-                         [('姓名', '金额'), ('李四', '2000'), ('张三', '1000')])
+                         [('姓名', '金额'), ('李四', 2000), ('张三', 1000)])
 
     def test_different_column_sets_leave_missing_values_blank(self):
         template = self.workbook('template.xlsx', {'汇总': [['姓名', '金额', '备注']]})
@@ -165,7 +175,7 @@ class SheetMappingTests(FileTestCase):
         })
         result = self.merge_files(template, source, {'一组': '汇总', '二组': '汇总'})
         self.assertEqual(list(result['汇总'].values)[1:],
-                         [('张三', '1000', None), ('李四', None, '补录')])
+                         [('张三', 1000, None), ('李四', None, '补录')])
 
     def test_extra_column_is_audited_against_original_source_sheet(self):
         template = self.workbook('template.xlsx', {'汇总': [['姓名', '金额']]})
@@ -217,7 +227,7 @@ class SheetMappingTests(FileTestCase):
         })
         result = self.merge_files(template, source, {'一组': '汇总', '二组': '汇总'})
         self.assertEqual(list(result['汇总'].values)[1:],
-                         [('source', '张三', '1000'), ('source', '李四', '2000')])
+                         [('source', '张三', 1000), ('source', '李四', 2000)])
 
     def test_all_sheets_skipped_returns_no_rows(self):
         source = self.workbook('source.xlsx', {'人员': [['姓名'], ['张三']]})
@@ -237,6 +247,24 @@ class SheetMappingTests(FileTestCase):
 
 
 class TemplateWritingTests(FileTestCase):
+    def test_merge_preserves_xlsx_cell_data_types_when_columns_are_reordered(self):
+        template = self.workbook('template.xlsx', {
+            '人员': [['金额', '数量', '启用', '日期', '标识']],
+        })
+        source = self.workbook('source.xlsx', {
+            '人员': [
+                ['标识', '日期', '启用', '数量', '金额'],
+                ['00123', date(2026, 10, 5), True, 2, 100.5],
+            ],
+        })
+
+        result = self.merge_files(template, source, {'人员': '人员'})
+        row = list(result['人员'].values)[1]
+
+        self.assertEqual(row, (100.5, 2, True, datetime(2026, 10, 5), '00123'))
+        self.assertEqual([result['人员'].cell(2, column).data_type for column in range(1, 6)],
+                         ['n', 'n', 'b', 'd', 's'])
+
     def test_merge_adds_calculation_properties_when_template_omits_them(self):
         template = self.workbook('template.xlsx', {'人员': [['姓名']]})
         self.remove_calculation_properties(template)
@@ -260,7 +288,7 @@ class TemplateWritingTests(FileTestCase):
 
         result = self.merge_files(template, source, {'人员': '人员'})
 
-        self.assertEqual(list(result['人员'].values)[1], ('3', '100', '97'))
+        self.assertEqual(list(result['人员'].values)[1], (3, 100, 97))
         self.assertNotEqual(result['人员']['C2'].data_type, 'f')
 
     def test_merge_output_is_a_valid_openxml_package_after_formula_conversion(self):
@@ -280,7 +308,7 @@ class TemplateWritingTests(FileTestCase):
             self.assertIsNone(archive.testzip())
         wb = openpyxl.load_workbook(output, data_only=False)
         self.addCleanup(wb.close)
-        self.assertEqual(wb['人员']['B2'].value, '2')
+        self.assertEqual(wb['人员']['B2'].value, 2)
         self.assertNotEqual(wb['人员']['B2'].data_type, 'f')
 
     def test_shorter_update_clears_old_tail_without_changing_source_or_styles(self):
@@ -380,6 +408,182 @@ class DuplicateColumnTests(FileTestCase):
 
 
 class SplitGroupingTests(FileTestCase):
+    def test_run_split_preserves_cell_formats_table_chart_and_freeze_panes(self):
+        source = Path(self.workbook('styled-source.xlsx', {
+            '人员': [
+                ['部门', '工号', '日期', '在岗', '金额'],
+                ['研发', '00123', date(2026, 10, 5), True, 100.5],
+                ['销售', '00007', date(2026, 10, 6), False, 88.0],
+            ],
+        }))
+        workbook = openpyxl.load_workbook(source)
+        worksheet = workbook['人员']
+        worksheet.freeze_panes = 'A2'
+        worksheet['B2'].number_format = '@'
+        worksheet['C2'].number_format = 'yyyy-mm-dd'
+        worksheet['E2'].number_format = '¥#,##0.00'
+        worksheet['B1'].fill = PatternFill('solid', fgColor='1F4E78')
+        table = Table(displayName='PeopleTable', ref='A1:E3')
+        table.tableStyleInfo = TableStyleInfo(name='TableStyleMedium2', showRowStripes=True)
+        worksheet.add_table(table)
+        chart = BarChart()
+        chart.add_data(Reference(worksheet, min_col=5, min_row=1, max_row=3), titles_from_data=True)
+        chart.set_categories(Reference(worksheet, min_col=2, min_row=2, max_row=3))
+        worksheet.add_chart(chart, 'G2')
+        workbook.save(source)
+        workbook.close()
+
+        output_dir = self.folder / 'styled-output'
+        result = run_split(SplitRequest(source, output_dir, {'人员': '部门'}))
+        self.assertEqual(len(result.output_files), 2)
+        output = openpyxl.load_workbook(output_dir / '研发.xlsx')
+        self.addCleanup(output.close)
+        result_sheet = output['人员']
+
+        self.assertEqual(result_sheet.freeze_panes, 'A2')
+        self.assertEqual(result_sheet['A2'].number_format, '@')
+        self.assertEqual(result_sheet['B2'].number_format, 'yyyy-mm-dd')
+        self.assertEqual(result_sheet['C2'].value, True)
+        self.assertEqual(result_sheet['C2'].data_type, 'b')
+        self.assertEqual(result_sheet['D2'].number_format, '¥#,##0.00')
+        self.assertEqual(result_sheet['A1'].fill.fgColor.rgb, '001F4E78')
+        self.assertEqual(len(result_sheet.tables), 1)
+        self.assertEqual(next(iter(result_sheet.tables.values())).ref, 'A1:D2')
+        self.assertEqual(len(result_sheet._charts), 1)
+
+    def test_run_split_translates_conditional_format_and_validation_formulas(self):
+        source = Path(self.workbook('rule-formulas.xlsx', {
+            '数据': [
+                ['部门', '上限', '数值'],
+                ['甲', 10, 12],
+                ['甲', 20, 18],
+            ],
+        }))
+        workbook = openpyxl.load_workbook(source)
+        worksheet = workbook['数据']
+        worksheet.conditional_formatting.add(
+            'C2:C3', FormulaRule(formula=['C2>B2'],
+                                 fill=PatternFill('solid', fgColor='FFC7CE')))
+        validation = DataValidation(type='list', formula1='$B$2:$B$3')
+        validation.add('C2:C3')
+        worksheet.add_data_validation(validation)
+        workbook.save(source)
+        workbook.close()
+
+        output_dir = self.folder / 'rule-formulas-output'
+        run_split(SplitRequest(source, output_dir, {'数据': '部门'}))
+
+        output = openpyxl.load_workbook(output_dir / '甲.xlsx')
+        self.addCleanup(output.close)
+        result_sheet = output['数据']
+        conditional, rules = next(iter(result_sheet.conditional_formatting._cf_rules.items()))
+        self.assertEqual(str(conditional.sqref), 'B2:B3')
+        self.assertEqual(rules[0].formula, ['B2>A2'])
+        result_validation = result_sheet.data_validations.dataValidation[0]
+        self.assertEqual(str(result_validation.sqref), 'B2:B3')
+        self.assertEqual(result_validation.formula1, '$A$2:$A$3')
+
+    def test_run_split_refuses_rule_formula_that_depends_on_another_group(self):
+        source = Path(self.workbook('cross-group-rule.xlsx', {
+            '数据': [
+                ['部门', '选项', '数值'],
+                ['甲', 'A', 1],
+                ['乙', 'B', 2],
+            ],
+        }))
+        workbook = openpyxl.load_workbook(source)
+        worksheet = workbook['数据']
+        validation = DataValidation(type='list', formula1='$B$2:$B$3')
+        validation.add('C2:C3')
+        worksheet.add_data_validation(validation)
+        workbook.save(source)
+        workbook.close()
+        output_dir = self.folder / 'cross-group-rule-output'
+
+        with self.assertRaisesRegex(InputError, '数据验证.*其他分组|其他分组.*数据验证'):
+            run_split(SplitRequest(source, output_dir, {'数据': '部门'}))
+
+        self.assertFalse(output_dir.exists())
+
+    def test_run_split_refuses_cross_sheet_formula_without_partial_output(self):
+        source = self.workbook('cross-sheet.xlsx', {
+            '数据': [['部门', '金额', '结果'], ['甲', 100, '=B2*参数!B2']],
+            '参数': [['名称', '值'], ['倍率', 1.15]],
+        })
+        output_dir = self.folder / 'cross-sheet-output'
+
+        with self.assertRaisesRegex(InputError, '跨 Sheet'):
+            run_split(SplitRequest(Path(source), output_dir, {'数据': '部门'}))
+
+        self.assertFalse(output_dir.exists())
+
+    def test_run_split_removes_invalid_table_from_header_only_sheet(self):
+        source = Path(self.workbook('header-only-table.xlsx', {
+            '人员': [['部门', '姓名'], ['研发', '张三']],
+            '项目': [['部门', '项目'], ['仅项目组', '专项']],
+        }))
+        workbook = openpyxl.load_workbook(source)
+        worksheet = workbook['人员']
+        worksheet.add_table(Table(displayName='PeopleTable', ref='A1:B2'))
+        workbook.save(source)
+        workbook.close()
+        output_dir = self.folder / 'header-only-output'
+
+        run_split(SplitRequest(
+            source, output_dir, {'人员': '部门', '项目': '部门'}))
+
+        output = openpyxl.load_workbook(output_dir / '仅项目组.xlsx')
+        self.addCleanup(output.close)
+        self.assertEqual(list(output['人员'].values), [('姓名',)])
+        self.assertEqual(len(output['人员'].tables), 0)
+
+    def test_run_split_refuses_formula_that_depends_on_another_group(self):
+        source = self.workbook('cross-group.xlsx', {
+            '数据': [
+                ['部门', '金额', '结果'],
+                ['甲', 100, '=B2*$B$3'],
+                ['乙', 200, '=B3*$B$3'],
+            ],
+        })
+        output_dir = self.folder / 'cross-group-output'
+
+        with self.assertRaisesRegex(InputError, '其他分组'):
+            run_split(SplitRequest(Path(source), output_dir, {'数据': '部门'}))
+
+        self.assertFalse(output_dir.exists())
+
+    def test_run_split_refuses_controls_instead_of_silently_flattening_them(self):
+        source = Path(self.workbook('controls.xlsx', {
+            '人员': [['部门', '在岗'], ['研发', True]],
+        }))
+        with zipfile.ZipFile(source, 'a', zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr('xl/ctrlProps/ctrlProp1.xml', '<formControlPr/>')
+        output_dir = self.folder / 'controls-output'
+
+        with self.assertRaisesRegex(InputError, '按钮|控件'):
+            run_split(SplitRequest(source, output_dir, {'人员': '部门'}))
+
+        self.assertFalse(output_dir.exists())
+
+    def test_split_preserves_xlsx_cell_data_types_used_by_formula(self):
+        source = self.workbook('source.xlsx', {
+            '人员': [
+                ['部门', '标识', '金额', '数量', '启用', '日期', '总额'],
+                ['研发', '00123', 100.5, 2, True, date(2026, 10, 5), '=C2*D2'],
+            ],
+        })
+
+        results = split.split_tables(source, {'人员': '部门'})
+        output = self.folder / '研发.xlsx'
+        split.write_xlsx(str(output), results['研发'])
+        wb = self.read_workbook(output)
+        row = list(wb['人员'].values)[1]
+
+        self.assertEqual(row,
+                         ('00123', 100.5, 2, True, datetime(2026, 10, 5), '=B2*C2'))
+        self.assertEqual([wb['人员'].cell(2, column).data_type for column in range(1, 7)],
+                         ['s', 'n', 'n', 'b', 'd', 'f'])
+
     def test_formula_moves_with_filtered_row_and_removed_split_column(self):
         source = self.workbook('source.xlsx', {
             '人员': [

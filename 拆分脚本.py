@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-大表拆分工具 v1.66 — 按指定列值将大表拆分为多个小表。
+大表拆分工具 v1.7 — 按指定列值将大表拆分为多个小表。
 每个 Sheet 独立选择拆分依据列，输出文件名=列值，Sheet名=原始Sheet名。
 使用 openpyxl 生成有效工作簿并调整拆分后的公式引用。独立运行，不依赖合并脚本。
 """
 
 import os, sys, time, traceback, re
+from pathlib import Path
 from dataclasses import dataclass, replace
 import tkinter as tk
 from tkinter import messagebox
 from collections import OrderedDict
 
-APP_VERSION = '1.66'
+APP_VERSION = '1.7'
 
 try:
     import openpyxl
@@ -563,7 +564,7 @@ def _plain_cell_value(value):
 def _split_output_value(value, removed_column):
     if isinstance(value, FormulaCell):
         return replace(value, removed_column=removed_column)
-    return str(value) if value is not None else ''
+    return value if value is not None else ''
 
 def split_tables(filepath, sheet_configs, rename_sheet=False):
     """按 sheet_configs 拆分大表。
@@ -697,6 +698,27 @@ def split_tables(filepath, sheet_configs, rename_sheet=False):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  v1.7 核心适配层
+# ══════════════════════════════════════════════════════════════════
+# GUI 只收集拆分配置和展示结果；实际读取、分组、公式移动与写出共享核心。
+from excel_combiner import split_core as _split_core
+from excel_combiner.models import SplitRequest
+
+
+def split_tables(filepath, sheet_configs, rename_sheet=False):
+    try:
+        return _split_core.split_tables(
+            filepath, sheet_configs, rename_sheet=rename_sheet, logger=log)
+    except Exception as exc:
+        log('  ❌ 拆分失败: %s' % exc)
+        return {}
+
+
+def write_xlsx(filepath, sheets_data):
+    return _split_core.write_xlsx(filepath, sheets_data, logger=log)
+
+
+# ══════════════════════════════════════════════════════════════════
 #  主流程
 # ══════════════════════════════════════════════════════════════════
 
@@ -771,43 +793,26 @@ def main():
     while os.path.exists(output_dir):
         output_dir = os.path.join(work_dir, f'拆分输出_{counter}')
         counter += 1
-    os.makedirs(output_dir, exist_ok=True)
     log(f'输出目录: {os.path.basename(output_dir)}/')
 
-    # 拆分
-    split_result = split_tables(filepath, sheet_configs, rename_sheet=rename_sheet)
-    if not split_result:
-        messagebox.showinfo('提示', '拆分后没有生成任何文件。\n请检查拆分列的值是否为空。')
-        log('无拆分结果，退出')
+    # 拆分与写出使用同一核心流程；先在临时目录完成，成功后再原子落盘。
+    try:
+        run_result = _split_core.run_split(SplitRequest(
+            source=Path(filepath),
+            output_dir=Path(output_dir),
+            sheet_configs=dict(sheet_configs),
+            rename_sheet=rename_sheet,
+        ), logger=log)
+    except Exception as exc:
+        messagebox.showerror('拆分失败', str(exc))
+        log('拆分失败: %s' % exc)
         write_log(os.path.join(work_dir, '拆分日志.txt'))
         _root.destroy()
         return
 
-    # 写入
-    success_count = 0
-    for safe_val, sheets_data in split_result.items():
-        output_path = os.path.join(output_dir, f'{safe_val}.xlsx')
-        try:
-            ordered_sheets = OrderedDict()
-            if rename_sheet and len(sheet_configs) == 1:
-                # v1.4：单 Sheet 时，Sheet 名 = 拆分列值（= 文件名 safe_val）
-                only_sn = next(iter(sheet_configs))
-                if only_sn in sheets_data and sheets_data[only_sn]:
-                    ordered_sheets[safe_val] = sheets_data[only_sn]
-            else:
-                for sn in sheet_configs:
-                    if sn in sheets_data and sheets_data[sn]:
-                        ordered_sheets[sn] = sheets_data[sn]
-            if ordered_sheets:
-                write_xlsx(output_path, ordered_sheets)
-                total_rows = sum(len(rows) - 1 for rows in ordered_sheets.values())
-                sheet_names = ', '.join(ordered_sheets.keys())
-                log(f'  ✅ {safe_val}.xlsx (Sheet: {sheet_names}, {total_rows} 行)')
-                success_count += 1
-            else:
-                log(f'  ⚠ {safe_val}.xlsx 无有效数据，跳过')
-        except Exception as e:
-            log(f'  ❌ 写入 {safe_val}.xlsx 失败: {e}')
+    success_count = len(run_result.output_files)
+    for output_file in run_result.output_files:
+        log('  ✅ %s' % output_file.name)
 
     log(f'共生成 {success_count} 个文件 → {output_dir}')
     write_log(os.path.join(work_dir, '拆分日志.txt'))
@@ -825,6 +830,12 @@ def main():
     _root.destroy()
 
 
+if __name__ == '__main__' and '--version' in sys.argv:
+    print('Excel Combiner Split %s' % APP_VERSION)
+    raise SystemExit(0)
+if __name__ == '__main__' and ('--help' in sys.argv or '-h' in sys.argv):
+    print('用法: 拆分脚本.py\n直接运行时打开图形界面。\n--version  显示版本号')
+    raise SystemExit(0)
 if __name__ == '__main__':
     try:
         main()
